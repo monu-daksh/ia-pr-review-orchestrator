@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import "node:process";
+import { createInterface } from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
 import { readDiffFromFile, readStdin } from "./utils/fs.js";
 import { buildGithubPRReviewReport, initProject, reviewDiff } from "./index.js";
-import type { ReviewResult } from "./types.js";
+import type { InstallProviderChoice, ReviewResult } from "./types.js";
 import { loadProjectEnv } from "./utils/env.js";
 
 function getArg(flag: string): string | undefined {
@@ -14,6 +16,79 @@ function getCommand(): string {
   const firstArg = process.argv[2];
   if (!firstArg || firstArg.startsWith("-")) return "review";
   return firstArg;
+}
+
+function isInteractiveShell(): boolean {
+  return Boolean(process.stdin.isTTY && process.stdout.isTTY);
+}
+
+function getDefaultModel(providerChoice: InstallProviderChoice): string {
+  switch (providerChoice) {
+    case "anthropic":
+      return "claude-opus-4-6";
+    case "openai":
+      return "gpt-4o-mini";
+    case "gemini":
+      return "gemini-2.0-flash";
+    case "ollama":
+      return "llama3.2";
+    case "local":
+      return "local-rules-only";
+    case "groq":
+    default:
+      return "llama-3.3-70b-versatile";
+  }
+}
+
+function getRequiredKey(providerChoice: InstallProviderChoice): string {
+  switch (providerChoice) {
+    case "groq":
+      return "GROQ_API_KEY";
+    case "gemini":
+      return "GEMINI_API_KEY";
+    case "anthropic":
+      return "ANTHROPIC_API_KEY";
+    case "openai":
+      return "OPENAI_API_KEY";
+    case "ollama":
+      return "OLLAMA_HOST";
+    default:
+      return "none";
+  }
+}
+
+async function promptInitSelection(): Promise<{ providerChoice: InstallProviderChoice; model: string }> {
+  const rl = createInterface({ input, output });
+
+  try {
+    console.log(`
+Choose how this repo should run PR reviews:
+  1. Groq free multi-agent
+  2. Gemini free multi-agent
+  3. Ollama local multi-agent
+  4. Anthropic Claude paid multi-agent
+  5. OpenAI paid mode
+  6. Local rules only
+`);
+
+    const providerAnswer = (await rl.question("Select provider [1]: ")).trim() || "1";
+    const providerChoice =
+      ({
+        "1": "groq",
+        "2": "gemini",
+        "3": "ollama",
+        "4": "anthropic",
+        "5": "openai",
+        "6": "local"
+      } as Record<string, InstallProviderChoice>)[providerAnswer] ?? "groq";
+
+    const defaultModel = getDefaultModel(providerChoice);
+    const model = (await rl.question(`Model [${defaultModel}]: `)).trim() || defaultModel;
+
+    return { providerChoice, model };
+  } finally {
+    rl.close();
+  }
 }
 
 async function runReview(): Promise<void> {
@@ -42,6 +117,13 @@ async function runReview(): Promise<void> {
             medium_count: 0,
             low_count: 0,
             final_decision: "approve"
+          },
+          reports: {
+            pr_comments: [],
+            agent_runs: [],
+            findings: [],
+            files: [],
+            markdown_summary: "# PR Review Summary\n\nNo changed files were reviewed."
           }
         },
         null,
@@ -64,9 +146,23 @@ async function runInit(): Promise<void> {
   const ci = (getArg("--ci") || "github") as "github" | "gitlab" | "both" | "none";
   const targetDir = getArg("--cwd");
   const installSource = getArg("--install-source") ?? "latest";
+  const providerArg = getArg("--provider") as InstallProviderChoice | undefined;
+  const modelArg = getArg("--model");
+  const selection = providerArg
+    ? { providerChoice: providerArg, model: modelArg || getDefaultModel(providerArg) }
+    : isInteractiveShell()
+      ? await promptInitSelection()
+      : { providerChoice: "groq" as InstallProviderChoice, model: getDefaultModel("groq") };
 
-  const result = await initProject({ ci, targetDir, installSource });
+  const result = await initProject({
+    ci,
+    targetDir,
+    installSource,
+    providerChoice: selection.providerChoice,
+    model: selection.model
+  });
   const repoName = result.rootDir.split(/[\\/]/).pop() ?? "your-repo";
+  const requiredKey = getRequiredKey(selection.providerChoice);
 
   const writtenList = result.writtenFiles.map((f) => `  + ${f.replace(result.rootDir, "")}`).join("\n");
   const updatedList = result.updatedFiles.map((f) => `  ~ ${f.replace(result.rootDir, "")}`).join("\n");
@@ -75,29 +171,30 @@ async function runInit(): Promise<void> {
     : "";
 
   console.log(`
-PR Review Orchestrator — Setup complete
+PR Review Orchestrator - Setup complete
 
 Files created in: ${result.rootDir}
 ${[writtenList, updatedList, skippedList].filter(Boolean).join("\n")}
 
 Detected repo type: ${result.detectedRepoTypes.join(", ")}
-Agents: security · bug · logic · types · eslint · quality (6 run in parallel per file)
+Agents: security | bug | logic | types | eslint | quality
+Selected provider profile: ${selection.providerChoice}
+Selected model: ${selection.model}
 
-─────────────────────────────────────────────────────────
+---------------------------------------------------------
  NEXT STEPS
-─────────────────────────────────────────────────────────
+---------------------------------------------------------
 
-1. Open .pr-review-orchestrator and add your API key:
+1. Open .pr-review-orchestrator and add your API key and model:
 
-   GROQ_API_KEY=your_groq_api_key_here   ← FREE  https://console.groq.com
-   # or when ready to upgrade:
-   # ANTHROPIC_API_KEY=your_key_here     ← PAID  https://console.anthropic.com
+   Required setting: ${requiredKey}
+   Selected model: ${selection.model}
 
-   This file is already gitignored — your key stays private.
+   This file is already gitignored, so your key stays private.
 
-2. Add the same key as a GitHub repository secret (for CI):
+2. Add the same value as a GitHub repository secret for CI:
    https://github.com/YOUR-USERNAME/${repoName}/settings/secrets/actions
-   Name: GROQ_API_KEY
+   Name: ${requiredKey}
 
 3. Commit and push the non-secret files:
    git add .github/workflows/pr-review-orchestrator.yml \\
@@ -106,17 +203,18 @@ Agents: security · bug · logic · types · eslint · quality (6 run in paralle
    git commit -m "add AI PR review"
    git push
 
-4. Open any PR (or push a new file) — the 6 agents run automatically
-   and post inline review comments on the PR.
+4. Open or update any PR. Each push reviews changed and newly added files
+   and posts file-level findings with severity, issue text, and corrected code.
 
-─────────────────────────────────────────────────────────
+---------------------------------------------------------
  UPGRADING TO ANTHROPIC CLAUDE LATER
-─────────────────────────────────────────────────────────
+---------------------------------------------------------
  No library code changes needed. Just:
-   1. Edit .pr-review-orchestrator — uncomment ANTHROPIC_API_KEY
+   1. Edit .pr-review-orchestrator and set ANTHROPIC_API_KEY
    2. Add ANTHROPIC_API_KEY to GitHub Secrets
-   All 6 agents switch to claude-opus-4-6 automatically.
-─────────────────────────────────────────────────────────
+   3. Optionally set ANTHROPIC_MODEL=claude-opus-4-6
+   The same multi-agent workflow will use Claude automatically.
+---------------------------------------------------------
 `);
 }
 
@@ -134,3 +232,4 @@ async function main() {
 main().catch(() => {
   process.exitCode = 1;
 });
+

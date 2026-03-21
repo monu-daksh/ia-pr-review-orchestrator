@@ -1,0 +1,6 @@
+.env
+.env.local
+.env.*.local
+.pr-review-orchestrator
+pr.diff
+review.json

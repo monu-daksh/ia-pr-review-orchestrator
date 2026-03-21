@@ -22,6 +22,24 @@ interface ProjectConfig {
   };
 }
 
+const PLACEHOLDER_PATTERNS = [
+  /^your[_-]/i,
+  /^replace[_-]/i,
+  /^paste[_-]/i,
+  /^add[_-]/i,
+  /api[_-]?key[_-]?here/i,
+  /token[_-]?here/i
+];
+
+export function isConfiguredValue(value: string | undefined | null): boolean {
+  if (!value) return false;
+
+  const normalized = value.trim();
+  if (!normalized) return false;
+
+  return !PLACEHOLDER_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 /**
  * Reads pr-review-orchestrator.config.json from the working repo and
  * applies provider + model settings as env defaults (only if not already set).

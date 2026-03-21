@@ -3,6 +3,7 @@ export type Severity = "critical" | "high" | "medium" | "low";
 export type IssueCategory = "bug" | "security" | "performance" | "quality";
 export type AgentName = "security" | "bug" | "logic" | "types" | "eslint" | "quality" | "fix";
 export type ProviderName = "multi-agent" | "claude" | "groq" | "gemini" | "ollama" | "openai" | "local";
+export type InstallProviderChoice = "groq" | "gemini" | "ollama" | "anthropic" | "openai" | "local";
 
 export interface AddedLine {
   line: number;
@@ -100,6 +101,30 @@ export interface AgentRunSummary {
   status: "completed";
 }
 
+export interface NormalizedFinding {
+  id: string;
+  file: string;
+  line: number;
+  agent: AgentName;
+  category: IssueCategory;
+  severity: Severity;
+  title: string;
+  issue: string;
+  code_snippet: string;
+  corrected_code?: string;
+  labels: string[];
+  confidence: number;
+}
+
+export interface FileFindingSummary {
+  file: string;
+  total_findings: number;
+  critical_count: number;
+  high_count: number;
+  medium_count: number;
+  low_count: number;
+}
+
 export interface ReviewFileResult {
   file: string;
   language: string;
@@ -132,6 +157,9 @@ export interface ReviewResult {
   reports: {
     pr_comments: PRComment[];
     agent_runs: AgentRunSummary[];
+    findings: NormalizedFinding[];
+    files: FileFindingSummary[];
+    markdown_summary: string;
   };
 }
 

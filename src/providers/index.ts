@@ -40,13 +40,14 @@ import { OllamaProvider } from "./ollama-provider.js";
 import { AnthropicProvider } from "./anthropic-provider.js";
 import { MultiAgentProvider } from "./multi-agent-provider.js";
 import type { ReviewProvider } from "../types.js";
+import { isConfiguredValue } from "../utils/env.js";
 
 function autoDetectProvider(): string {
-  if (process.env.ANTHROPIC_API_KEY) return "multi-agent"; // Claude powers agents
-  if (process.env.GROQ_API_KEY) return "multi-agent";      // Groq powers agents (free)
-  if (process.env.GEMINI_API_KEY) return "multi-agent";    // Gemini powers agents (free)
-  if (process.env.OLLAMA_HOST) return "multi-agent";       // Ollama powers agents (local)
-  if (process.env.OPENAI_API_KEY) return "openai";
+  if (isConfiguredValue(process.env.ANTHROPIC_API_KEY)) return "multi-agent"; // Claude powers agents
+  if (isConfiguredValue(process.env.GROQ_API_KEY)) return "multi-agent";      // Groq powers agents (free)
+  if (isConfiguredValue(process.env.GEMINI_API_KEY)) return "multi-agent";    // Gemini powers agents (free)
+  if (isConfiguredValue(process.env.OLLAMA_HOST)) return "multi-agent";       // Ollama powers agents (local)
+  if (isConfiguredValue(process.env.OPENAI_API_KEY)) return "openai";
   return "local";
 }
 

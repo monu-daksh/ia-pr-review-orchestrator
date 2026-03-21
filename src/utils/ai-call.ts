@@ -1,3 +1,5 @@
+import { isConfiguredValue } from "./env.js";
+
 /**
  * Generic AI caller — tries providers in priority order:
  *
@@ -62,7 +64,8 @@ interface OllamaResponse {
  */
 async function callClaude(messages: AIMessage[], maxTokens: number): Promise<string | null> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return null;
+  if (!isConfiguredValue(apiKey)) return null;
+  const configuredApiKey = apiKey as string;
 
   const model = process.env.ANTHROPIC_MODEL ?? "claude-opus-4-6";
   const systemText = messages.find((m) => m.role === "system")?.content ?? "";
@@ -75,7 +78,7 @@ async function callClaude(messages: AIMessage[], maxTokens: number): Promise<str
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": apiKey,
+        "x-api-key": configuredApiKey,
         "anthropic-version": "2023-06-01"
       },
       body: JSON.stringify({
@@ -106,7 +109,8 @@ async function callClaude(messages: AIMessage[], maxTokens: number): Promise<str
 
 async function callGroq(messages: AIMessage[], maxTokens: number): Promise<string | null> {
   const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) return null;
+  if (!isConfiguredValue(apiKey)) return null;
+  const configuredApiKey = apiKey as string;
 
   const model = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
 
@@ -115,7 +119,7 @@ async function callGroq(messages: AIMessage[], maxTokens: number): Promise<strin
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`
+        "Authorization": `Bearer ${configuredApiKey}`
       },
       body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature: 0.1 })
     });
@@ -130,14 +134,15 @@ async function callGroq(messages: AIMessage[], maxTokens: number): Promise<strin
 
 async function callGemini(messages: AIMessage[], maxTokens: number): Promise<string | null> {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) return null;
+  if (!isConfiguredValue(apiKey)) return null;
+  const configuredApiKey = apiKey as string;
 
   const model = process.env.GEMINI_MODEL ?? "gemini-2.0-flash";
   const systemText = messages.find((m) => m.role === "system")?.content ?? "";
   const userText = messages.filter((m) => m.role === "user").map((m) => m.content).join("\n");
 
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${configuredApiKey}`;
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -200,9 +205,10 @@ export async function callAI(system: string, user: string, maxTokens = 1200): Pr
 
 /** Returns which AI provider is currently configured, for diagnostics. */
 export function detectAvailableAI(): "claude" | "groq" | "gemini" | "ollama" | "none" {
-  if (process.env.ANTHROPIC_API_KEY) return "claude";
-  if (process.env.GROQ_API_KEY) return "groq";
-  if (process.env.GEMINI_API_KEY) return "gemini";
-  if (process.env.OLLAMA_HOST) return "ollama";
+  if (isConfiguredValue(process.env.ANTHROPIC_API_KEY)) return "claude";
+  if (isConfiguredValue(process.env.GROQ_API_KEY)) return "groq";
+  if (isConfiguredValue(process.env.GEMINI_API_KEY)) return "gemini";
+  if (isConfiguredValue(process.env.OLLAMA_HOST)) return "ollama";
   return "none";
 }
+

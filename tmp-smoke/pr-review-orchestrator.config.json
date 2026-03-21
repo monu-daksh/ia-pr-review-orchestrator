@@ -1,0 +1,31 @@
+{
+  "provider": "multi-agent",
+  "install": {
+    "providerChoice": "groq",
+    "selectedModel": "llama-3.3-70b-versatile",
+    "requiredEnv": "GROQ_API_KEY"
+  },
+  "models": {
+    "groq": "llama-3.3-70b-versatile",
+    "anthropic": "claude-opus-4-6",
+    "gemini": "gemini-2.0-flash",
+    "openai": "gpt-4o-mini",
+    "ollama": "llama3.2"
+  },
+  "ci": {
+    "failOnSeverity": []
+  },
+  "review": {
+    "includePaths": [
+      "src",
+      "server",
+      "api"
+    ],
+    "maxContextLines": 12
+  },
+  "repo": {
+    "detectedTypes": [
+      "node"
+    ]
+  }
+}

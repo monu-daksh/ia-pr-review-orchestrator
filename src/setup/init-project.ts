@@ -1,10 +1,13 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { InstallProviderChoice } from "../types.js";
 
 interface InitOptions {
   targetDir?: string;
   ci?: "github" | "gitlab" | "both" | "none";
   installSource?: string;
+  providerChoice?: InstallProviderChoice;
+  model?: string;
 }
 
 interface InitResult {
@@ -52,66 +55,78 @@ async function writeFileIfMissing(filePath: string, content: string, result: Ini
   result.writtenFiles.push(filePath);
 }
 
-/**
- * Builds the AI keys + model config file that lives in the working repo.
- *
- * This file is GITIGNORED — it holds the actual API key.
- * The library loads it automatically via loadProjectEnv().
- * Developers just fill in their key and model, then everything works.
- */
-function buildAiConfig(): string {
+function getDefaultModel(providerChoice: InstallProviderChoice): string {
+  switch (providerChoice) {
+    case "anthropic":
+      return "claude-opus-4-6";
+    case "openai":
+      return "gpt-4o-mini";
+    case "gemini":
+      return "gemini-2.0-flash";
+    case "ollama":
+      return "llama3.2";
+    case "local":
+      return "local-rules-only";
+    case "groq":
+    default:
+      return "llama-3.3-70b-versatile";
+  }
+}
+
+function getRequiredEnv(providerChoice: InstallProviderChoice): string | null {
+  switch (providerChoice) {
+    case "groq":
+      return "GROQ_API_KEY";
+    case "gemini":
+      return "GEMINI_API_KEY";
+    case "anthropic":
+      return "ANTHROPIC_API_KEY";
+    case "openai":
+      return "OPENAI_API_KEY";
+    case "ollama":
+      return "OLLAMA_HOST";
+    default:
+      return null;
+  }
+}
+
+function buildAiConfig(providerChoice: InstallProviderChoice, model: string): string {
+  const providerMode = providerChoice === "local" ? "local" : "multi-agent";
+
   return [
-    "# ─────────────────────────────────────────────────────────────────────────",
-    "# pr-review-orchestrator — AI keys & model config",
-    "#",
-    "# !! GITIGNORED — never commit this file, it contains your API key !!",
-    "#",
-    "# This file is read automatically by the library.",
-    "# Fill in ONE provider key below, save, and the review agents are ready.",
-    "# ─────────────────────────────────────────────────────────────────────────",
+    "# ---------------------------------------------------------------------------",
+    "# pr-review-orchestrator repository-local AI config",
+    "# This file is gitignored. Add your own API key and model here.",
+    `# Selected provider profile: ${providerChoice}`,
+    `# Selected model: ${model}`,
+    "# ---------------------------------------------------------------------------",
     "",
-    "# ── STEP 1: Choose a provider ────────────────────────────────────────────",
-    "# multi-agent = 6 specialized agents (security, bug, logic, types, eslint, quality)",
-    "# The agents automatically use whichever key you provide below.",
-    "PR_REVIEW_PROVIDER=multi-agent",
+    `PR_REVIEW_PROVIDER=${providerMode}`,
     "",
-    "# ── STEP 2: Add your API key (fill in one block, comment out the rest) ───",
+    "# Free options for testing",
+    `${providerChoice === "groq" ? "" : "# "}GROQ_API_KEY=your_groq_api_key_here`,
+    `${providerChoice === "groq" ? "" : "# "}GROQ_MODEL=${providerChoice === "groq" ? model : getDefaultModel("groq")}`,
     "",
-    "# ┌─ FREE — Groq + Llama 3.3 70B (recommended to start) ───────────────────",
-    "# │  14,400 requests/day · very fast · get free key: https://console.groq.com",
-    "GROQ_API_KEY=your_groq_api_key_here",
-    "GROQ_MODEL=llama-3.3-70b-versatile",
+    `${providerChoice === "gemini" ? "" : "# "}GEMINI_API_KEY=your_gemini_api_key_here`,
+    `${providerChoice === "gemini" ? "" : "# "}GEMINI_MODEL=${providerChoice === "gemini" ? model : getDefaultModel("gemini")}`,
     "",
-    "# ┌─ FREE — Google Gemini Flash (alternative free option) ─────────────────",
-    "# │  1M tokens/day · get free key: https://aistudio.google.com/apikey",
-    "# GEMINI_API_KEY=your_gemini_api_key_here",
-    "# GEMINI_MODEL=gemini-2.0-flash",
+    `${providerChoice === "ollama" ? "" : "# "}OLLAMA_HOST=http://localhost:11434`,
+    `${providerChoice === "ollama" ? "" : "# "}OLLAMA_MODEL=${providerChoice === "ollama" ? model : getDefaultModel("ollama")}`,
     "",
-    "# ┌─ FREE — Ollama (local, offline, no API key needed) ────────────────────",
-    "# │  Install: https://ollama.com  then run: ollama pull llama3.2",
-    "# OLLAMA_HOST=http://localhost:11434",
-    "# OLLAMA_MODEL=llama3.2",
+    "# Paid upgrade options",
+    `${providerChoice === "anthropic" ? "" : "# "}ANTHROPIC_API_KEY=your_anthropic_api_key_here`,
+    `${providerChoice === "anthropic" ? "" : "# "}ANTHROPIC_MODEL=${providerChoice === "anthropic" ? model : getDefaultModel("anthropic")}`,
     "",
-    "# ┌─ PAID — Anthropic Claude (best quality, upgrade when ready) ────────────",
-    "# │  When you add this key, all 6 agents auto-upgrade to Claude.",
-    "# │  No code changes needed. Get key: https://console.anthropic.com",
-    "# ANTHROPIC_API_KEY=your_anthropic_api_key_here",
-    "# ANTHROPIC_MODEL=claude-opus-4-6      # best quality",
-    "# ANTHROPIC_MODEL=claude-sonnet-4-6    # balanced speed/quality",
-    "# ANTHROPIC_MODEL=claude-haiku-4-5     # fastest / cheapest",
+    `${providerChoice === "openai" ? "" : "# "}OPENAI_API_KEY=your_openai_api_key_here`,
+    `${providerChoice === "openai" ? "" : "# "}OPENAI_MODEL=${providerChoice === "openai" ? model : getDefaultModel("openai")}`,
     "",
-    "# ┌─ PAID — OpenAI (alternative paid option) ───────────────────────────────",
-    "# OPENAI_API_KEY=your_openai_api_key_here",
-    "# OPENAI_MODEL=gpt-4o-mini",
+    "# Local rules-only mode",
+    `${providerChoice === "local" ? "" : "# "}LOCAL_REVIEW_MODE=rules-only`,
     ""
   ].join("\n");
 }
 
-/**
- * Builds pr-review-orchestrator.config.json — committed to git, no secrets.
- * Controls which paths to review, CI severity thresholds, etc.
- */
-function buildConfig(repoTypes: string[]): string {
+function buildConfig(repoTypes: string[], providerChoice: InstallProviderChoice, model: string): string {
   const include = repoTypes.includes("react")
     ? ["src", "app", "components", "pages", "server", "api"]
     : repoTypes.includes("python")
@@ -122,7 +137,19 @@ function buildConfig(repoTypes: string[]): string {
 
   return JSON.stringify(
     {
-      provider: "multi-agent",
+      provider: providerChoice === "local" ? "local" : "multi-agent",
+      install: {
+        providerChoice,
+        selectedModel: model,
+        requiredEnv: getRequiredEnv(providerChoice)
+      },
+      models: {
+        groq: providerChoice === "groq" ? model : getDefaultModel("groq"),
+        anthropic: providerChoice === "anthropic" ? model : getDefaultModel("anthropic"),
+        gemini: providerChoice === "gemini" ? model : getDefaultModel("gemini"),
+        openai: providerChoice === "openai" ? model : getDefaultModel("openai"),
+        ollama: providerChoice === "ollama" ? model : getDefaultModel("ollama")
+      },
       ci: {
         failOnSeverity: []
       },
@@ -143,14 +170,12 @@ function buildGithubWorkflow(): string {
   return `name: PR Review Orchestrator
 
 on:
-  # Fires when a PR is opened, new commits are pushed to it, or new files are added
   pull_request:
     types: [opened, synchronize, reopened]
-    branches: [main, master, develop]
-
-  # Also fires on direct push to main (e.g. a merge commit)
+  workflow_dispatch:
   push:
-    branches: [main, master]
+    branches:
+      - "**"
 
 permissions:
   contents: read
@@ -170,25 +195,20 @@ jobs:
           node-version: 20
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Run AI review
         env:
-          # ── API keys — add these in GitHub: Settings → Secrets → Actions ────
-          # Only ONE key is needed. The agents auto-pick whichever is available.
-          #
-          # FREE  → GROQ_API_KEY   (Groq, Llama 3.3 70B) https://console.groq.com
-          # FREE  → GEMINI_API_KEY (Gemini Flash)         https://aistudio.google.com/apikey
-          # PAID  → ANTHROPIC_API_KEY (Claude, upgrade)   https://console.anthropic.com
           GROQ_API_KEY: \${{ secrets.GROQ_API_KEY }}
           GROQ_MODEL: \${{ secrets.GROQ_MODEL }}
           GEMINI_API_KEY: \${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: \${{ secrets.GEMINI_MODEL }}
+          OLLAMA_HOST: \${{ secrets.OLLAMA_HOST }}
+          OLLAMA_MODEL: \${{ secrets.OLLAMA_MODEL }}
           ANTHROPIC_API_KEY: \${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_MODEL: \${{ secrets.ANTHROPIC_MODEL }}
           OPENAI_API_KEY: \${{ secrets.OPENAI_API_KEY }}
-          # ── Provider + model — read from pr-review-orchestrator.config.json ──
-          # Override here only if you need a different value in CI:
-          # PR_REVIEW_PROVIDER: groq
+          OPENAI_MODEL: \${{ secrets.OPENAI_MODEL }}
           GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: \${{ github.repository }}
         run: |
@@ -198,6 +218,9 @@ jobs:
             git diff HEAD~1...HEAD > pr.diff
           fi
           npx pr-review-orchestrator review --diff ./pr.diff --format github-pr > review.json
+
+      - name: Print review summary
+        run: node -e "const r=JSON.parse(require('fs').readFileSync('review.json','utf8')); console.log(r.reports?.markdown_summary ?? 'No summary generated');"
 
       - name: Post PR Review Comments
         if: github.event_name == 'pull_request'
@@ -227,14 +250,11 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.payload.pull_request.number,
-                body: 'PR Review Orchestrator: no high-confidence findings in this diff.'
+                body: review.summary?.total_issues > 0
+                  ? review.reports?.markdown_summary || 'PR review completed.'
+                  : 'PR Review Orchestrator: no high-confidence findings in this diff.'
               });
             }
-
-      # Uncomment to block the pipeline on critical/high findings:
-      # - name: Block on critical findings
-      #   run: |
-      #     node -e "const r=JSON.parse(require('fs').readFileSync('review.json','utf8')); if((r.summary?.critical_count??0)>0||(r.summary?.high_count??0)>0)process.exit(1);"
 
       - name: Upload review artifact
         uses: actions/upload-artifact@v4
@@ -253,19 +273,7 @@ pr_review:
   stage: review
   only:
     - merge_requests
-    - main
-    - master
-  variables:
-    # ── API keys — add these in GitLab: Settings → CI/CD → Variables ─────────
-    # Only ONE key is needed. Agents auto-pick whichever is available.
-    #
-    # FREE  → GROQ_API_KEY   (Groq, Llama 3.3 70B) https://console.groq.com
-    # FREE  → GEMINI_API_KEY (Gemini Flash)         https://aistudio.google.com/apikey
-    # PAID  → ANTHROPIC_API_KEY (Claude, upgrade)   https://console.anthropic.com
-    #
-    # Provider + model are read from pr-review-orchestrator.config.json (committed).
-    # Override here only if needed:
-    # PR_REVIEW_PROVIDER: groq
+    - branches
   script:
     - npm ci
     - |
@@ -276,8 +284,6 @@ pr_review:
       fi
     - npx pr-review-orchestrator review --diff ./pr.diff --format github-pr > review.json
     - cat review.json
-    # Uncomment to block pipeline on critical/high findings:
-    # - node -e "const r=JSON.parse(require('fs').readFileSync('review.json','utf8')); if((r.summary?.critical_count??0)>0||(r.summary?.high_count??0)>0)process.exit(1);"
   artifacts:
     paths:
       - review.json
@@ -296,7 +302,6 @@ async function updatePackageJson(rootDir: string, installSource: string, result:
   packageJson.scripts ??= {};
   packageJson.devDependencies ??= {};
 
-  // Add library to devDependencies so `npm ci` in CI installs it automatically
   if (!packageJson.devDependencies["pr-review-orchestrator"]) {
     packageJson.devDependencies["pr-review-orchestrator"] = installSource;
   }
@@ -309,16 +314,17 @@ async function updatePackageJson(rootDir: string, installSource: string, result:
     packageJson.scripts["pr:review:dry"] = "git diff origin/main...HEAD | pr-review-orchestrator review --stdin --dry-run";
   }
 
+  if (!packageJson.scripts["pr:review:init"]) {
+    packageJson.scripts["pr:review:init"] = "pr-review-orchestrator init";
+  }
+
   await fs.writeFile(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`, "utf8");
   result.updatedFiles.push(packageJsonPath);
 }
 
 async function updateGitIgnore(rootDir: string, result: InitResult): Promise<void> {
   const gitIgnorePath = path.join(rootDir, ".gitignore");
-
-  // .pr-review-orchestrator is the secrets file — must be gitignored
   const entries = [".env", ".env.local", ".env.*.local", ".pr-review-orchestrator", "pr.diff", "review.json"];
-
   const existing = (await pathExists(gitIgnorePath)) ? await fs.readFile(gitIgnorePath, "utf8") : "";
 
   const lines = new Set(
@@ -349,18 +355,18 @@ export async function initProject(options: InitOptions = {}): Promise<InitResult
   };
 
   const ci = options.ci || "github";
+  const providerChoice = options.providerChoice ?? "groq";
+  const model = options.model ?? getDefaultModel(providerChoice);
 
-  // Secrets + model config — GITIGNORED, filled in by developer
   await writeFileIfMissing(
     path.join(rootDir, ".pr-review-orchestrator"),
-    buildAiConfig(),
+    buildAiConfig(providerChoice, model),
     result
   );
 
-  // Public config — committed to git, no secrets
   await writeFileIfMissing(
     path.join(rootDir, "pr-review-orchestrator.config.json"),
-    buildConfig(repoTypes),
+    buildConfig(repoTypes, providerChoice, model),
     result
   );
 
@@ -380,8 +386,6 @@ export async function initProject(options: InitOptions = {}): Promise<InitResult
     );
   }
 
-  // installSource is what gets written into devDependencies.
-  // "latest" works once published to npm. Until then the user sets it to their GitHub URL.
   const installSource = options.installSource ?? "latest";
   await updatePackageJson(rootDir, installSource, result);
   await updateGitIgnore(rootDir, result);
