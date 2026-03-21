@@ -1,0 +1,38 @@
+stages:
+  - review
+
+pr_review:
+  image: node:20
+  stage: review
+  only:
+    - merge_requests
+    - main
+    - master
+  variables:
+    # ── Phase 1: Free AI ──────────────────────────────────────────────────────
+    # Add one of these in GitLab: Settings → CI/CD → Variables
+    # GROQ_API_KEY: ""      # free, https://console.groq.com
+    # GEMINI_API_KEY: ""    # free, https://aistudio.google.com/apikey
+    #
+    # ── Phase 2: Upgrade to Anthropic Claude ──────────────────────────────────
+    # Just add ANTHROPIC_API_KEY — all 6 agents auto-upgrade, no code changes needed.
+    # ANTHROPIC_API_KEY: ""                  # https://console.anthropic.com
+    # ANTHROPIC_MODEL: "claude-opus-4-6"    # best quality
+    # ANTHROPIC_MODEL: "claude-sonnet-4-6"  # balanced
+    # ANTHROPIC_MODEL: "claude-haiku-4-5"   # fastest/cheapest
+    PR_REVIEW_PROVIDER: "multi-agent"
+  script:
+    - npm install --no-save pr-review-orchestrator
+    - |
+      if [ -n "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" ]; then
+        git diff origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME...HEAD > pr.diff
+      else
+        git diff HEAD~1...HEAD > pr.diff
+      fi
+    - npx pr-review-orchestrator review --diff ./pr.diff --format github-pr > review.json
+    - cat review.json
+    # Uncomment to block pipeline on critical/high findings:
+    # - node -e "const r=JSON.parse(require('fs').readFileSync('review.json','utf8')); if((r.summary?.critical_count??0)>0||(r.summary?.high_count??0)>0)process.exit(1);"
+  artifacts:
+    paths:
+      - review.json

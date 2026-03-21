@@ -1,0 +1,60 @@
+{
+  "name": "pr-review-orchestrator",
+  "version": "1.0.0",
+  "description": "Multi-agent AI PR review system. Install in any repo — agents auto-fire on PRs and post inline code review comments.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "pr-review-orchestrator": "./dist/cli.js"
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "dist/**/*.js.map",
+    "README.md"
+  ],
+  "keywords": [
+    "pr-review",
+    "code-review",
+    "ai",
+    "multi-agent",
+    "github-actions",
+    "llm",
+    "groq",
+    "anthropic",
+    "claude",
+    "automated-review",
+    "ci"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "npm run build",
+    "start": "tsx ./src/cli.ts",
+    "api:dev": "tsx ./examples/express-review-api.ts",
+    "review:stdin": "tsx ./src/cli.ts --stdin",
+    "review:file": "tsx ./src/cli.ts --diff ./samples/react-node.diff",
+    "check": "tsx ./src/cli.ts --diff ./samples/react-node.diff --dry-run"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {},
+  "optionalDependencies": {
+    "@anthropic-ai/sdk": "^0.54.0",
+    "openai": "^6.7.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.6.0",
+    "express": "^5.1.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.3"
+  }
+}

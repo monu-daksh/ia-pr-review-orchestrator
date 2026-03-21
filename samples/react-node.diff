@@ -1,0 +1,24 @@
+diff --git a/src/components/ProfileCard.tsx b/src/components/ProfileCard.tsx
+index 1111111..2222222 100644
+--- a/src/components/ProfileCard.tsx
++++ b/src/components/ProfileCard.tsx
+@@ -10,6 +10,10 @@ export function ProfileCard({ user }: { user: User }) {
+   return (
+     <div>
++      <div dangerouslySetInnerHTML={{ __html: user.bio }} />
++      <button onClick={() => fetch(`/api/users/${user.id}`)}>
++        Refresh
++      </button>
+     </div>
+   );
+ }
+diff --git a/server/routes/user.js b/server/routes/user.js
+index 3333333..4444444 100644
+--- a/server/routes/user.js
++++ b/server/routes/user.js
+@@ -21,6 +21,8 @@ app.get('/user/:id', async (req, res) => {
+   const id = req.params.id;
++  const sql = `select * from users where id = ${id}`;
++  const data = await db.query(sql);
+   res.json(data);
+ });

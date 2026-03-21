@@ -1,0 +1,104 @@
+name: PR Review Orchestrator
+
+on:
+  # Fires when a PR is opened, new commits are pushed to it, or new files are added
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main, master, develop]
+
+  # Also fires on direct push to main (e.g. a merge commit)
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install PR Review Orchestrator
+        run: |
+          # Option A (after npm publish): npm install --no-save pr-review-orchestrator
+          # Option B (install directly from GitHub — use this until published to npm):
+          npm install --no-save github:YOUR-GITHUB-USERNAME/pr-review-orchestrator
+
+      - name: Run AI review
+        env:
+          # ── API keys — add these in GitHub: Settings → Secrets → Actions ────
+          # Only ONE key is needed. The 6 agents auto-pick whichever is available.
+          #
+          # FREE  → GROQ_API_KEY    (Groq, Llama 3.3 70B) https://console.groq.com
+          # FREE  → GEMINI_API_KEY  (Gemini Flash)         https://aistudio.google.com/apikey
+          # PAID  → ANTHROPIC_API_KEY (Claude, upgrade)    https://console.anthropic.com
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # ── Provider — read from pr-review-orchestrator.config.json ──────────
+          # Override here only if you need a different value in CI:
+          # PR_REVIEW_PROVIDER: groq
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git diff origin/${{ github.base_ref }}...HEAD > pr.diff
+          else
+            git diff HEAD~1...HEAD > pr.diff
+          fi
+          npx pr-review-orchestrator review --diff ./pr.diff --format github-pr > review.json
+
+      - name: Post PR Review Comments
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const review = JSON.parse(fs.readFileSync('review.json', 'utf8'));
+            const comments = Array.isArray(review.comments) ? review.comments : [];
+
+            if (comments.length > 0) {
+              await github.rest.pulls.createReview({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.payload.pull_request.number,
+                commit_id: context.payload.pull_request.head.sha,
+                event: 'COMMENT',
+                comments: comments.map((c) => ({
+                  path: c.path,
+                  line: c.line,
+                  side: 'RIGHT',
+                  body: c.body
+                }))
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body: 'PR Review Orchestrator: no high-confidence findings in this diff.'
+              });
+            }
+
+      # Uncomment to block the pipeline on critical/high findings:
+      # - name: Block on critical findings
+      #   run: |
+      #     node -e "const r=JSON.parse(require('fs').readFileSync('review.json','utf8')); if((r.summary?.critical_count??0)>0||(r.summary?.high_count??0)>0)process.exit(1);"
+
+      - name: Upload review artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-review-json
+          path: review.json
