@@ -38,6 +38,62 @@ interface AgentSpec {
   label: string;
 }
 
+function normalizeText(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function issueText(issue: AIReviewIssue): string {
+  return normalizeText(`${issue.title} ${issue.message} ${issue.code_snippet} ${issue.suggestion ?? ""} ${issue.fix ?? ""}`);
+}
+
+function hasAny(text: string, patterns: string[]): boolean {
+  return patterns.some((pattern) => text.includes(pattern));
+}
+
+function issueBelongsToAgent(agent: Exclude<AgentName, "fix">, issue: AIReviewIssue): boolean {
+  const text = issueText(issue);
+
+  const securityPatterns = [
+    "secret", "api key", "token", "password", "xss", "dangerouslysetinnerhtml", "redirect",
+    "javascript", "injection", "sanitize", "unsafe url", "script src", "img src", "console log secret"
+  ];
+  const bugPatterns = [
+    "null", "undefined", "promise", "unhandled", "race condition", "memory leak", "infinite loop",
+    "freeze", "crash", "async misuse", "unreachable", "dead code"
+  ];
+  const logicPatterns = [
+    "wrong condition", "loose equality", "==", "mutation", "incorrect calculation", "incorrect transformation",
+    "inconsistent", "invalid assumption", "edge case", "business logic"
+  ];
+  const performancePatterns = [
+    "performance", "expensive", "memo", "usememo", "usecallback", "re render", "rerender",
+    "math random", "date now", "blocking", "large loop", "heavy computation", "duplicate expensive"
+  ];
+  const eslintPatterns = [
+    "unused", "console", "inline function", "formatting", "naming", "hook dependency", "loose equality", "style"
+  ];
+  const typePatterns = [
+    "any", "type", "interface", "props", "state", "optional chaining", "type assertion", "typed", "typescript"
+  ];
+  const bestPracticePatterns = [
+    "hardcoded", "separation of concerns", "error handling", "direct dom", "reusability", "component structure"
+  ];
+  const qualityPatterns = [
+    "key prop", "hydration", "side effect", "link usage", "loading state", "error state", "bundle size",
+    "extract component", "duplicate code", "readability", "maintainability", "large component", "nested condition"
+  ];
+
+  if (agent === "security") return hasAny(text, securityPatterns);
+  if (agent === "bug") return hasAny(text, bugPatterns) && !hasAny(text, securityPatterns);
+  if (agent === "logic") return hasAny(text, logicPatterns) && !hasAny(text, securityPatterns);
+  if (agent === "performance") return hasAny(text, performancePatterns) && !hasAny(text, securityPatterns);
+  if (agent === "eslint") return hasAny(text, eslintPatterns) && !hasAny(text, securityPatterns);
+  if (agent === "types") return hasAny(text, typePatterns) && !hasAny(text, securityPatterns);
+  if (agent === "best-practices") return hasAny(text, bestPracticePatterns) && !hasAny(text, securityPatterns);
+  if (agent === "quality") return hasAny(text, qualityPatterns) && !hasAny(text, securityPatterns);
+  return true;
+}
+
 function buildCodeContext(file: TriagedFile): string {
   const lines = file.addedLines.map((line) => `${line.line}: ${line.content}`).join("\n");
   return [
@@ -65,9 +121,14 @@ const AGENT_SPECS: AgentSpec[] = [
     label: "security",
     maxTokens: 1000,
     system: `You are an expert application security engineer performing a focused security review.
-Analyze ONLY for security vulnerabilities: XSS, SQL injection, command injection, CSRF, insecure auth,
-secrets in code, insecure deserialization, path traversal, SSRF, open redirects, weak authorization,
-and unsafe trust of user input.
+Analyze ONLY for these security issues:
+- Hardcoded secrets, tokens, passwords, API keys
+- XSS, dangerouslySetInnerHTML, unsanitized input
+- Open redirects and unsafe URLs
+- Sensitive data in logs
+- Injection risks
+- Insecure image or script sources
+- Token leakage in URLs
 Do NOT report style, performance, or general code quality issues.
 ${JSON_INSTRUCTION}`
   },
@@ -78,8 +139,13 @@ ${JSON_INSTRUCTION}`
     label: "bug",
     maxTokens: 1000,
     system: `You are a senior software engineer performing a focused bug review.
-Analyze ONLY for runtime bugs: unhandled promises, null/undefined dereferences, race conditions,
-error-handling gaps, memory leaks, and behavior that will break at runtime.
+Analyze ONLY for runtime and correctness bugs:
+- Null/undefined risks
+- Dead code or unreachable code
+- Infinite loops
+- Race conditions and async misuse
+- Mutating data incorrectly
+- Incorrect calculations or transformations
 Do NOT report security or style issues.
 ${JSON_INSTRUCTION}`
   },
@@ -90,8 +156,13 @@ ${JSON_INSTRUCTION}`
     label: "logic",
     maxTokens: 1000,
     system: `You are a senior software engineer performing a focused logic review.
-Analyze ONLY for logic issues: wrong conditionals, missing edge cases, incorrect algorithms,
-incorrect state transitions, invalid assumptions, and wrong business behavior.
+Analyze ONLY for logic issues:
+- Wrong conditions like == instead of ===
+- Missing edge cases
+- Incorrect algorithms
+- Inconsistent UI logic
+- Invalid assumptions
+- Wrong business behavior
 Do NOT report security issues from this agent.
 ${JSON_INSTRUCTION}`
   },
@@ -102,8 +173,13 @@ ${JSON_INSTRUCTION}`
     label: "types",
     maxTokens: 900,
     system: `You are a TypeScript and static typing expert performing a focused type-safety review.
-Analyze ONLY for unsafe any usage, unsafe casts, missing null checks, type mismatches,
-and public APIs that are too weakly typed.
+Analyze ONLY for:
+- any usage
+- Missing interfaces or types
+- Unsafe optional chaining
+- Type assertion misuse
+- Props/state/function params not typed
+- Inconsistent types
 Do NOT report security or performance issues from this agent.
 ${JSON_INSTRUCTION}`
   },
@@ -114,8 +190,14 @@ ${JSON_INSTRUCTION}`
     label: "eslint",
     maxTokens: 800,
     system: `You are a linting and style expert performing a focused static review.
-Analyze ONLY for lint-rule violations, dead code, console statements in production paths,
-and highly likely style or consistency problems.
+Analyze ONLY for:
+- any type usage
+- Unused variables or functions
+- Inline functions in JSX
+- Missing dependencies in hooks
+- Extra logs
+- Loose equality
+- Formatting or naming issues
 Do NOT report security or performance issues from this agent.
 ${JSON_INSTRUCTION}`
   },
@@ -126,9 +208,14 @@ ${JSON_INSTRUCTION}`
     label: "performance",
     maxTokens: 850,
     system: `You are a performance review expert performing a focused performance review.
-Analyze ONLY for performance risks: expensive work in render paths, repeated heavy computation,
-blocking synchronous work, unnecessary sorting/filtering in hot code, N+1 style data fetching,
-and avoidable large object creation inside loops.
+Analyze ONLY for:
+- Heavy computations in render
+- Repeated function calls
+- Unnecessary re-renders
+- Math.random or Date.now in UI
+- Missing memoization
+- Large loops or blocking code
+- Duplicate expensive operations
 Do NOT report security issues from this agent.
 ${JSON_INSTRUCTION}`
   },
@@ -139,8 +226,14 @@ ${JSON_INSTRUCTION}`
     label: "best-practices",
     maxTokens: 850,
     system: `You are a senior reviewer focused on engineering best practices.
-Analyze ONLY for maintainability and best-practice issues: missing validation, hidden assumptions,
-unsafe suppression comments, poor separation of concerns, and patterns that teams usually regret later.
+Analyze ONLY for:
+- Hardcoded values
+- No separation of concerns
+- Business logic inside UI
+- No error handling
+- Direct DOM manipulation
+- Poor component structure
+- No reusability
 Do NOT report direct security issues from this agent if the security agent would own them.
 ${JSON_INSTRUCTION}`
   },
@@ -150,9 +243,16 @@ ${JSON_INSTRUCTION}`
     confidence: 0.75,
     label: "quality",
     maxTokens: 800,
-    system: `You are a software architect performing a focused code quality review.
-Analyze ONLY for maintainability issues: duplicated logic, confusing naming, tight coupling,
-poor readability, and patterns that will be hard to test or extend.
+    system: `You are a software architect performing a focused React, Next.js, maintainability, and optimization review.
+Analyze ONLY for:
+- Using index or random as keys
+- Hydration issues like Math.random or Date.now in SSR
+- Side effects inside render
+- Improper Link usage
+- Missing loading or error states
+- Duplicate code
+- Complex functions or large components
+- Poor readability or maintainability
 Do NOT report direct security issues from this agent if the security agent would own them.
 ${JSON_INSTRUCTION}`
   }
@@ -165,7 +265,9 @@ async function runAISecurityAgent(file: TriagedFile, spec: AgentSpec): Promise<S
   const parsed = safeJsonParse<AIAgentResponse | null>(text, null);
   if (!parsed?.issues?.length) return [];
 
-  return parsed.issues.map((issue) => ({
+  return parsed.issues
+    .filter((issue) => issueBelongsToAgent(spec.agent, issue))
+    .map((issue) => ({
     id: `S-ai-${file.file}-${issue.line}-${spec.agent}`,
     category: "security",
     severity: issue.severity,
@@ -189,7 +291,9 @@ async function runAIReviewAgent(file: TriagedFile, spec: AgentSpec): Promise<Rev
   const parsed = safeJsonParse<AIAgentResponse | null>(text, null);
   if (!parsed?.issues?.length) return [];
 
-  return parsed.issues.map((issue) => ({
+  return parsed.issues
+    .filter((issue) => issueBelongsToAgent(spec.agent, issue))
+    .map((issue) => ({
     id: `R-ai-${spec.agent}-${file.file}-${issue.line}`,
     category: spec.category,
     severity: issue.severity,
