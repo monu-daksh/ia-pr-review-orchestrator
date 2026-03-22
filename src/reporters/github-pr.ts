@@ -9,6 +9,7 @@ export interface GithubPRReviewReport {
     body: string;
   }>;
   summary_comment: string;
+  summary_only_findings: number;
 }
 
 const SEVERITY_BADGE: Record<string, string> = {
@@ -41,20 +42,7 @@ function resolveCommentLine(review: ReviewResult, comment: PRComment): number | 
   const changedLines = file?.changed_lines?.filter((line) => Number.isFinite(line)) ?? [];
 
   if (changedLines.length === 0) return null;
-  if (changedLines.includes(comment.line)) return comment.line;
-
-  let nearest = changedLines[0];
-  let nearestDistance = Math.abs(comment.line - nearest);
-
-  for (const line of changedLines.slice(1)) {
-    const distance = Math.abs(comment.line - line);
-    if (distance < nearestDistance) {
-      nearest = line;
-      nearestDistance = distance;
-    }
-  }
-
-  return nearest;
+  return changedLines.includes(comment.line) ? comment.line : null;
 }
 
 function toGithubComment(review: ReviewResult, comment: PRComment): GithubPRReviewReport["comments"][number] | null {
@@ -63,14 +51,21 @@ function toGithubComment(review: ReviewResult, comment: PRComment): GithubPRRevi
 
   const badge = SEVERITY_BADGE[comment.severity] ?? comment.severity.toUpperCase();
   const agent = AGENT_LABEL[comment.agent] ?? comment.agent;
-  const lines: string[] = [`[${badge}] ${comment.title}`, `Agent: ${agent}`, ""];
+  const lines: string[] = [
+    `## [${badge}] ${comment.title}`,
+    "",
+    `**Agent:** ${agent}`,
+    `**File:** \`${comment.file}\``,
+    `**Line:** ${comment.line}`,
+    ""
+  ];
 
   if (comment.issue) {
-    lines.push(comment.issue, "");
+    lines.push("**Issue**", comment.issue, "");
   }
 
   if (comment.corrected_code?.trim()) {
-    lines.push("Fix:", fenceBlock(comment.corrected_code), "");
+    lines.push("**Fix**", fenceBlock(comment.corrected_code), "");
   }
 
   return {
@@ -82,12 +77,18 @@ function toGithubComment(review: ReviewResult, comment: PRComment): GithubPRRevi
 }
 
 function buildSummaryComment(review: ReviewResult): string {
+  const inlineKeys = new Set(
+    review.reports.pr_comments
+      .map((comment) => toGithubComment(review, comment))
+      .filter((comment): comment is GithubPRReviewReport["comments"][number] => comment !== null)
+      .map((comment) => `${comment.path}:${comment.line}:${comment.body}`)
+  );
   const lines = [
     "## PR Review Orchestrator",
     "",
-    `Decision: ${review.summary.final_decision}`,
-    `Total issues: ${review.summary.total_issues}`,
-    `Critical: ${review.summary.critical_count} | High: ${review.summary.high_count} | Medium: ${review.summary.medium_count} | Low: ${review.summary.low_count}`,
+    `**Decision:** ${review.summary.final_decision}`,
+    `**Total issues:** ${review.summary.total_issues}`,
+    `**Severity:** Critical ${review.summary.critical_count} | High ${review.summary.high_count} | Medium ${review.summary.medium_count} | Low ${review.summary.low_count}`,
     ""
   ];
 
@@ -96,21 +97,41 @@ function buildSummaryComment(review: ReviewResult): string {
     return lines.join("\n");
   }
 
-  lines.push("Findings:", "");
+  lines.push("### Findings", "");
 
   for (const comment of review.reports.pr_comments.slice(0, 20)) {
-    lines.push(`- ${comment.file}:${comment.line} [${comment.severity.toUpperCase()}] ${comment.title} (${AGENT_LABEL[comment.agent] ?? comment.agent})`);
+    const badge = SEVERITY_BADGE[comment.severity] ?? comment.severity.toUpperCase();
+    const agent = AGENT_LABEL[comment.agent] ?? comment.agent;
+    const inlineVersion = toGithubComment(review, comment);
+    const isInline = inlineVersion ? inlineKeys.has(`${inlineVersion.path}:${inlineVersion.line}:${inlineVersion.body}`) : false;
+
+    lines.push(`#### [${badge}] ${comment.title}`);
+    lines.push(`- Agent: ${agent}`);
+    lines.push(`- File: \`${comment.file}\``);
+    lines.push(`- Line: ${comment.line}`);
+    lines.push(`- Placement: ${isInline ? "Inline comment" : "Summary only"}`);
+    lines.push(`- Issue: ${comment.issue}`);
+
+    if (comment.corrected_code?.trim()) {
+      lines.push("- Fix:");
+      lines.push(fenceBlock(comment.corrected_code));
+    }
+
+    lines.push("");
   }
 
   return lines.join("\n");
 }
 
 export function buildGithubPRReviewReport(review: ReviewResult): GithubPRReviewReport {
+  const comments = review.reports.pr_comments
+    .map((comment) => toGithubComment(review, comment))
+    .filter((comment): comment is GithubPRReviewReport["comments"][number] => comment !== null);
+
   return {
     summary: review.summary,
-    comments: review.reports.pr_comments
-      .map((comment) => toGithubComment(review, comment))
-      .filter((comment): comment is GithubPRReviewReport["comments"][number] => comment !== null),
-    summary_comment: buildSummaryComment(review)
+    comments,
+    summary_comment: buildSummaryComment(review),
+    summary_only_findings: Math.max(0, review.reports.pr_comments.length - comments.length)
   };
 }
