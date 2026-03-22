@@ -17,6 +17,15 @@ interface AgentOutput {
   changesSummary: string[];
 }
 
+function createOutput(): AgentOutput {
+  return {
+    reviewIssues: [],
+    securityIssues: [],
+    patches: [],
+    changesSummary: []
+  };
+}
+
 function buildFixedCode(file: TriagedFile, patches: Patch[]): string {
   if (patches.length === 0) return "";
 
@@ -25,16 +34,16 @@ function buildFixedCode(file: TriagedFile, patches: Patch[]): string {
     patchByLine.set(patch.line, patch.fixed);
   }
 
-  return file.addedLines
-    .map((line) => patchByLine.get(line.line) ?? line.content)
-    .join("\n");
+  return file.addedLines.map((line) => patchByLine.get(line.line) ?? line.content).join("\n");
 }
 
 function buildComment(issue: ReviewIssue | SecurityIssue): PRComment {
   const correctedCode =
-    "corrected_code" in issue && issue.corrected_code ? issue.corrected_code :
-    "fix" in issue ? issue.fix :
-    issue.suggestion;
+    "corrected_code" in issue && issue.corrected_code
+      ? issue.corrected_code
+      : "fix" in issue
+        ? issue.fix
+        : issue.suggestion;
 
   return {
     id: issue.id,
@@ -59,12 +68,7 @@ function buildComment(issue: ReviewIssue | SecurityIssue): PRComment {
 }
 
 function runSecurityAgent(file: TriagedFile): AgentOutput {
-  const output: AgentOutput = {
-    reviewIssues: [],
-    securityIssues: [],
-    patches: [],
-    changesSummary: []
-  };
+  const output = createOutput();
 
   for (const addedLine of file.addedLines) {
     if (/dangerouslySetInnerHTML/.test(addedLine.content)) {
@@ -82,28 +86,18 @@ function runSecurityAgent(file: TriagedFile): AgentOutput {
         line: addedLine.line,
         code_snippet: addedLine.content.trim(),
         title: "Unsafe HTML rendering",
-        message: "Unsanitized HTML can lead to XSS in PR-reviewed frontend code.",
+        message: "Unsanitized HTML can lead to XSS in frontend code.",
         fix: fixed,
         corrected_code: fixed,
         labels: ["security", "high", "xss"],
         confidence: 0.96
       });
 
-      output.patches.push({
-        file: file.file,
-        line: addedLine.line,
-        original: addedLine.content,
-        fixed
-      });
+      output.patches.push({ file: file.file, line: addedLine.line, original: addedLine.content, fixed });
       output.changesSummary.push(`Sanitized HTML rendering at line ${addedLine.line}.`);
     }
 
     if (/select .*where .*=\s*\$\{.+\}/i.test(addedLine.content)) {
-      const fixed = addedLine.content.replace(
-        /`select \* from users where id = \$\{id\}`/i,
-        "\"select * from users where id = ?\""
-      );
-
       output.securityIssues.push({
         id: `S-${file.file}-${addedLine.line}-sql`,
         category: "security",
@@ -113,9 +107,9 @@ function runSecurityAgent(file: TriagedFile): AgentOutput {
         line: addedLine.line,
         code_snippet: addedLine.content.trim(),
         title: "Interpolated SQL query",
-        message: "String interpolation in SQL can expose the route to injection.",
-        fix: "const sql = \"select * from users where id = ?\";",
-        corrected_code: "const sql = \"select * from users where id = ?\";",
+        message: "String interpolation in SQL can expose the query to injection.",
+        fix: 'const sql = "select * from users where id = ?";',
+        corrected_code: 'const sql = "select * from users where id = ?";',
         labels: ["security", "critical", "sql-injection"],
         confidence: 0.99
       });
@@ -124,9 +118,9 @@ function runSecurityAgent(file: TriagedFile): AgentOutput {
         file: file.file,
         line: addedLine.line,
         original: addedLine.content,
-        fixed: "  const sql = \"select * from users where id = ?\";"
+        fixed: '  const sql = "select * from users where id = ?";'
       });
-      output.changesSummary.push(`Replaced interpolated SQL with a parameterized query template at line ${addedLine.line}.`);
+      output.changesSummary.push(`Replaced interpolated SQL with a parameterized query at line ${addedLine.line}.`);
     }
 
     if (/db\.query\(sql\)/.test(addedLine.content)) {
@@ -136,7 +130,7 @@ function runSecurityAgent(file: TriagedFile): AgentOutput {
         original: addedLine.content,
         fixed: "  const data = await db.query(sql, [id]);"
       });
-      output.changesSummary.push(`Bound route parameter to SQL query arguments at line ${addedLine.line}.`);
+      output.changesSummary.push(`Bound query parameters at line ${addedLine.line}.`);
     }
   }
 
@@ -144,12 +138,7 @@ function runSecurityAgent(file: TriagedFile): AgentOutput {
 }
 
 function runBugAgent(file: TriagedFile): AgentOutput {
-  const output: AgentOutput = {
-    reviewIssues: [],
-    securityIssues: [],
-    patches: [],
-    changesSummary: []
-  };
+  const output = createOutput();
 
   for (const addedLine of file.addedLines) {
     if (/fetch\(/.test(addedLine.content) && !/await /.test(addedLine.content)) {
@@ -174,13 +163,174 @@ function runBugAgent(file: TriagedFile): AgentOutput {
   return output;
 }
 
+function runLogicAgent(file: TriagedFile): AgentOutput {
+  const output = createOutput();
+
+  for (const addedLine of file.addedLines) {
+    if (/db\.query\(sql\)/.test(addedLine.content) && !/\[id\]/.test(addedLine.content)) {
+      output.reviewIssues.push({
+        id: `R-${file.file}-${addedLine.line}-logic`,
+        category: "bug",
+        severity: "high",
+        agent: "logic",
+        file: file.file,
+        line: addedLine.line,
+        code_snippet: addedLine.content.trim(),
+        title: "Query call misses bound parameters",
+        message: "The query uses a SQL template but does not pass the route parameter to the DB driver.",
+        suggestion: "Pass the route parameter as a bound argument in the query call.",
+        corrected_code: "const data = await db.query(sql, [id]);",
+        labels: ["logic", "high"],
+        confidence: 0.93
+      });
+    }
+  }
+
+  return output;
+}
+
+function runTypesAgent(file: TriagedFile): AgentOutput {
+  const output = createOutput();
+
+  for (const addedLine of file.addedLines) {
+    if (/\bcatch\s*\(\s*error\s*\)/.test(addedLine.content) && !/unknown/.test(addedLine.content)) {
+      output.reviewIssues.push({
+        id: `R-${file.file}-${addedLine.line}-catch-type`,
+        category: "quality",
+        severity: "low",
+        agent: "types",
+        file: file.file,
+        line: addedLine.line,
+        code_snippet: addedLine.content.trim(),
+        title: "Untyped caught error",
+        message: "Use unknown for caught errors in TypeScript-friendly code paths.",
+        suggestion: "Annotate the caught error before narrowing it.",
+        corrected_code: addedLine.content.replace(/\berror\b/, "error: unknown"),
+        labels: ["types", "low"],
+        confidence: 0.76
+      });
+    }
+  }
+
+  return output;
+}
+
+function runEslintAgent(file: TriagedFile): AgentOutput {
+  const output = createOutput();
+
+  for (const addedLine of file.addedLines) {
+    if (/console\.(log|error)\(/.test(addedLine.content)) {
+      output.reviewIssues.push({
+        id: `R-${file.file}-${addedLine.line}-eslint-console`,
+        category: "quality",
+        severity: "low",
+        agent: "eslint",
+        file: file.file,
+        line: addedLine.line,
+        code_snippet: addedLine.content.trim(),
+        title: "Console statement in application path",
+        message: "This may violate strict lint rules in production repos.",
+        suggestion: "Route the event to a logger helper instead.",
+        corrected_code: addedLine.content.replace(/console\.(log|error)/, "logger.$1"),
+        labels: ["eslint", "low"],
+        confidence: 0.72
+      });
+    }
+
+    if (/\bvar\b/.test(addedLine.content)) {
+      output.reviewIssues.push({
+        id: `R-${file.file}-${addedLine.line}-eslint-var`,
+        category: "quality",
+        severity: "low",
+        agent: "eslint",
+        file: file.file,
+        line: addedLine.line,
+        code_snippet: addedLine.content.trim(),
+        title: "Use let/const instead of var",
+        message: "Most repos enforce no-var in lint rules.",
+        suggestion: "Replace var with const or let.",
+        corrected_code: addedLine.content.replace(/\bvar\b/, "const"),
+        labels: ["eslint", "low"],
+        confidence: 0.88
+      });
+    }
+  }
+
+  return output;
+}
+
+function runPerformanceAgent(file: TriagedFile): AgentOutput {
+  const output = createOutput();
+
+  for (const addedLine of file.addedLines) {
+    if (/\.sort\(/.test(addedLine.content) || /\.reverse\(/.test(addedLine.content)) {
+      output.reviewIssues.push({
+        id: `R-${file.file}-${addedLine.line}-performance-sort`,
+        category: "performance",
+        severity: "medium",
+        agent: "performance",
+        file: file.file,
+        line: addedLine.line,
+        code_snippet: addedLine.content.trim(),
+        title: "Potential expensive collection work in hot path",
+        message: "Sorting or reversing inside frequently executed code can become expensive as data grows.",
+        suggestion: "Precompute or memoize the transformed collection before rendering or repeated execution.",
+        corrected_code: "const sortedItems = [...items].sort(compareItems);",
+        labels: ["performance", "medium"],
+        confidence: 0.74
+      });
+    }
+  }
+
+  return output;
+}
+
+function runBestPracticesAgent(file: TriagedFile): AgentOutput {
+  const output = createOutput();
+
+  for (const addedLine of file.addedLines) {
+    if (/@ts-ignore/.test(addedLine.content)) {
+      output.reviewIssues.push({
+        id: `R-${file.file}-${addedLine.line}-best-practices-ignore`,
+        category: "quality",
+        severity: "medium",
+        agent: "best-practices",
+        file: file.file,
+        line: addedLine.line,
+        code_snippet: addedLine.content.trim(),
+        title: "Type suppression added",
+        message: "Suppressing type errors can hide real regressions and should usually be a last resort.",
+        suggestion: "Prefer fixing the underlying type mismatch or narrowing the type safely.",
+        corrected_code: "// Replace the suppression with a safer type guard or explicit type refinement.",
+        labels: ["best-practices", "medium"],
+        confidence: 0.83
+      });
+    }
+
+    if (/==[^=]/.test(addedLine.content)) {
+      output.reviewIssues.push({
+        id: `R-${file.file}-${addedLine.line}-best-practices-equality`,
+        category: "quality",
+        severity: "low",
+        agent: "best-practices",
+        file: file.file,
+        line: addedLine.line,
+        code_snippet: addedLine.content.trim(),
+        title: "Loose equality check",
+        message: "Loose equality can hide coercion bugs and is usually avoided in shared codebases.",
+        suggestion: "Use strict equality unless coercion is explicitly intended.",
+        corrected_code: addedLine.content.replace(/==/g, "===").replace(/!===$/, "!=="),
+        labels: ["best-practices", "low"],
+        confidence: 0.71
+      });
+    }
+  }
+
+  return output;
+}
+
 function runQualityAgent(file: TriagedFile): AgentOutput {
-  const output: AgentOutput = {
-    reviewIssues: [],
-    securityIssues: [],
-    patches: [],
-    changesSummary: []
-  };
+  const output = createOutput();
 
   for (const addedLine of file.addedLines) {
     if (/\bany\b/.test(addedLine.content)) {
@@ -205,153 +355,6 @@ function runQualityAgent(file: TriagedFile): AgentOutput {
   return output;
 }
 
-function runLogicAgent(file: TriagedFile): AgentOutput {
-  const output: AgentOutput = {
-    reviewIssues: [],
-    securityIssues: [],
-    patches: [],
-    changesSummary: []
-  };
-
-  for (const addedLine of file.addedLines) {
-    if (/db\.query\(sql\)/.test(addedLine.content) && !/\[id\]/.test(addedLine.content)) {
-      output.reviewIssues.push({
-        id: `R-${file.file}-${addedLine.line}-logic`,
-        category: "bug",
-        severity: "high",
-        agent: "logic",
-        file: file.file,
-        line: addedLine.line,
-        code_snippet: addedLine.content.trim(),
-        title: "Query call misses bound parameters",
-        message: "The query uses a SQL template but does not pass the route parameter to the DB driver.",
-        suggestion: "Pass the route parameter as a bound argument in the query call.",
-        corrected_code: "const data = await db.query(sql, [id]);",
-        labels: ["bug", "high", "logic"],
-        confidence: 0.93
-      });
-    }
-
-    if (/onClick=\{\(\)\s*=>\s*fetch\(/.test(addedLine.content)) {
-      output.reviewIssues.push({
-        id: `R-${file.file}-${addedLine.line}-handler`,
-        category: "quality",
-        severity: "medium",
-        agent: "logic",
-        file: file.file,
-        line: addedLine.line,
-        code_snippet: addedLine.content.trim(),
-        title: "Inline side-effect handler",
-        message: "Embedding async side effects directly in JSX makes logic harder to test and recover from.",
-        suggestion: "Move the request into a named async handler.",
-        corrected_code: "const handleRefresh = async () => { try { await fetch(`/api/users/${user.id}`); } catch (error) { console.error(error); } };",
-        labels: ["quality", "medium", "logic"],
-        confidence: 0.79
-      });
-    }
-  }
-
-  return output;
-}
-
-function runTypesAgent(file: TriagedFile): AgentOutput {
-  const output: AgentOutput = {
-    reviewIssues: [],
-    securityIssues: [],
-    patches: [],
-    changesSummary: []
-  };
-
-  for (const addedLine of file.addedLines) {
-    if (/\bcatch\s*\(\s*error\s*\)/.test(addedLine.content) && !/unknown/.test(addedLine.content)) {
-      output.reviewIssues.push({
-        id: `R-${file.file}-${addedLine.line}-catch-type`,
-        category: "quality",
-        severity: "low",
-        agent: "types",
-        file: file.file,
-        line: addedLine.line,
-        code_snippet: addedLine.content.trim(),
-        title: "Untyped caught error",
-        message: "Use `unknown` for caught errors in TypeScript-friendly code paths.",
-        suggestion: "Annotate the caught error before narrowing it.",
-        corrected_code: addedLine.content.replace(/\berror\b/, "error: unknown"),
-        labels: ["quality", "low", "types"],
-        confidence: 0.76
-      });
-    }
-
-    if (/sanitizeHtml\(/.test(addedLine.content) && file.language === "TypeScript") {
-      output.reviewIssues.push({
-        id: `R-${file.file}-${addedLine.line}-import`,
-        category: "quality",
-        severity: "low",
-        agent: "types",
-        file: file.file,
-        line: addedLine.line,
-        code_snippet: addedLine.content.trim(),
-        title: "New helper may need import typing",
-        message: "If `sanitizeHtml` is introduced, ensure the helper is imported and typed in the module.",
-        suggestion: "Add a typed import for the sanitizer helper.",
-        corrected_code: "import { sanitizeHtml } from \"../utils/sanitizeHtml\";",
-        labels: ["quality", "low", "types"],
-        confidence: 0.68
-      });
-    }
-  }
-
-  return output;
-}
-
-function runEslintAgent(file: TriagedFile): AgentOutput {
-  const output: AgentOutput = {
-    reviewIssues: [],
-    securityIssues: [],
-    patches: [],
-    changesSummary: []
-  };
-
-  for (const addedLine of file.addedLines) {
-    if (/console\.error\(/.test(addedLine.content)) {
-      output.reviewIssues.push({
-        id: `R-${file.file}-${addedLine.line}-eslint-console`,
-        category: "quality",
-        severity: "low",
-        agent: "eslint",
-        file: file.file,
-        line: addedLine.line,
-        code_snippet: addedLine.content.trim(),
-        title: "Console logging in application path",
-        message: "This may violate strict ESLint rules in production repos.",
-        suggestion: "Route the error to your logger or error boundary helper.",
-        corrected_code: addedLine.content.replace("console.error", "logger.error"),
-        labels: ["quality", "low", "eslint"],
-        confidence: 0.72
-      });
-    }
-
-    if (/\bvar\b/.test(addedLine.content)) {
-      output.reviewIssues.push({
-        id: `R-${file.file}-${addedLine.line}-eslint-var`,
-        category: "quality",
-        severity: "low",
-        agent: "eslint",
-        file: file.file,
-        line: addedLine.line,
-        code_snippet: addedLine.content.trim(),
-        title: "Use let/const instead of var",
-        message: "Most repos enforce no-var in lint rules.",
-        suggestion: "Replace `var` with `const` or `let`.",
-        corrected_code: addedLine.content.replace(/\bvar\b/, "const"),
-        labels: ["quality", "low", "eslint"],
-        confidence: 0.88
-      });
-    }
-  }
-
-  return output;
-}
-
 function mergeOutputs(file: TriagedFile, outputs: AgentOutput[]): ReviewFileResult {
   const reviewIssues = outputs.flatMap((output) => output.reviewIssues);
   const securityIssues = outputs.flatMap((output) => output.securityIssues);
@@ -362,12 +365,8 @@ function mergeOutputs(file: TriagedFile, outputs: AgentOutput[]): ReviewFileResu
     file: file.file,
     language: file.language,
     triage: file.triage,
-    review: {
-      issues: reviewIssues
-    },
-    security: {
-      vulnerabilities: securityIssues
-    },
+    review: { issues: reviewIssues },
+    security: { vulnerabilities: securityIssues },
     fix: {
       required: patches.length > 0,
       fixed_code: buildFixedCode(file, patches),
@@ -380,11 +379,11 @@ function mergeOutputs(file: TriagedFile, outputs: AgentOutput[]): ReviewFileResu
 function buildAgentRuns(files: ReviewFileResult[]): AgentRunSummary[] {
   const allIssues = files.flatMap((file) => [...file.review.issues, ...file.security.vulnerabilities]);
   const patchCount = files.reduce((total, file) => total + file.fix.patches.length, 0);
-  return ["security", "bug", "logic", "types", "eslint", "quality", "fix"].map((agent) => ({
+  return (["security", "bug", "logic", "types", "eslint", "performance", "best-practices", "quality", "fix"] as const).map((agent) => ({
     agent,
     findings: agent === "fix" ? patchCount : allIssues.filter((issue) => issue.agent === agent).length,
     status: "completed"
-  })) as AgentRunSummary[];
+  }));
 }
 
 export function runLocalAgentPipeline(triagedFiles: TriagedFile[]): ReviewResult {
@@ -397,6 +396,8 @@ export function runLocalAgentPipeline(triagedFiles: TriagedFile[]): ReviewResult
       runLogicAgent(file),
       runTypesAgent(file),
       runEslintAgent(file),
+      runPerformanceAgent(file),
+      runBestPracticesAgent(file),
       runQualityAgent(file)
     ])
   );

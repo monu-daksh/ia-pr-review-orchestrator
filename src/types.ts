@@ -1,7 +1,7 @@
 export type RiskLevel = "low" | "medium" | "high";
 export type Severity = "critical" | "high" | "medium" | "low";
 export type IssueCategory = "bug" | "security" | "performance" | "quality";
-export type AgentName = "security" | "bug" | "logic" | "types" | "eslint" | "quality" | "fix";
+export type AgentName = "security" | "bug" | "logic" | "types" | "eslint" | "performance" | "best-practices" | "quality" | "fix";
 export type ProviderName = "multi-agent" | "claude" | "groq" | "gemini" | "ollama" | "openai" | "local";
 export type InstallProviderChoice = "groq" | "gemini" | "ollama" | "anthropic" | "openai" | "local";
 

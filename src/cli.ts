@@ -7,6 +7,10 @@ import { buildGithubPRReviewReport, initProject, reviewDiff } from "./index.js";
 import type { InstallProviderChoice, ReviewResult } from "./types.js";
 import { loadProjectEnv } from "./utils/env.js";
 
+const TOOL_DIR = "pr-review-orchestrator";
+const LOCAL_CONFIG_PATH = `${TOOL_DIR}/local.json`;
+const PROJECT_CONFIG_PATH = `${TOOL_DIR}/config.json`;
+
 function getArg(flag: string): string | undefined {
   const index = process.argv.indexOf(flag);
   return index >= 0 ? process.argv[index + 1] : undefined;
@@ -177,20 +181,30 @@ Files created in: ${result.rootDir}
 ${[writtenList, updatedList, skippedList].filter(Boolean).join("\n")}
 
 Detected repo type: ${result.detectedRepoTypes.join(", ")}
-Agents: security | bug | logic | types | eslint | quality
+Agents: security | bug | logic | types | eslint | performance | best-practices | quality
 Selected provider profile: ${selection.providerChoice}
 Selected model: ${selection.model}
+
+---------------------------------------------------------
+ SINGLE TOOL FOLDER
+---------------------------------------------------------
+ All tool files now live in:
+   ${TOOL_DIR}/
+
+ Developer secret and model file:
+   ${LOCAL_CONFIG_PATH}
+
+ Developer project config file:
+   ${PROJECT_CONFIG_PATH}
 
 ---------------------------------------------------------
  NEXT STEPS
 ---------------------------------------------------------
 
-1. Open .pr-review-orchestrator and add your API key and model:
+1. Open ${LOCAL_CONFIG_PATH} and add your API key and model:
 
    Required setting: ${requiredKey}
    Selected model: ${selection.model}
-
-   This file is already gitignored, so your key stays private.
 
 2. Add the same value as a GitHub repository secret for CI:
    https://github.com/YOUR-USERNAME/${repoName}/settings/secrets/actions
@@ -198,23 +212,13 @@ Selected model: ${selection.model}
 
 3. Commit and push the non-secret files:
    git add .github/workflows/pr-review-orchestrator.yml \\
-           pr-review-orchestrator.config.json \\
+           ${PROJECT_CONFIG_PATH} \\
            .gitignore
    git commit -m "add AI PR review"
    git push
 
-4. Open or update any PR. Each push reviews changed and newly added files
-   and posts file-level findings with severity, issue text, and corrected code.
-
----------------------------------------------------------
- UPGRADING TO ANTHROPIC CLAUDE LATER
----------------------------------------------------------
- No library code changes needed. Just:
-   1. Edit .pr-review-orchestrator and set ANTHROPIC_API_KEY
-   2. Add ANTHROPIC_API_KEY to GitHub Secrets
-   3. Optionally set ANTHROPIC_MODEL=claude-opus-4-6
-   The same multi-agent workflow will use Claude automatically.
----------------------------------------------------------
+4. Open or update any PR. The workflow will review changed files
+   and post file-level findings in GitHub PR comments.
 `);
 }
 

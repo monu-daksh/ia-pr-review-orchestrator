@@ -4,12 +4,15 @@ import path from "node:path";
 const DEFAULT_ENV_FILES = [
   ".env",
   ".env.local",
-  ".pr-review-orchestrator",         // secrets + model config created by init
-  ".env.pr-review-orchestrator",     // legacy / manual alternative
-  ".env.pr-review-orchestrator.local"
+  ".env.pr-review-orchestrator",
+  ".env.pr-review-orchestrator.local",
+  ".pr-review-orchestrator"
 ];
 
-const CONFIG_FILE = "pr-review-orchestrator.config.json";
+const TOOL_DIR = "pr-review-orchestrator";
+const PROJECT_CONFIG_PATH = path.join(TOOL_DIR, "config.json");
+const LOCAL_CONFIG_PATH = path.join(TOOL_DIR, "local.json");
+const LEGACY_CONFIG_FILE = "pr-review-orchestrator.config.json";
 
 interface ProjectConfig {
   provider?: string;
@@ -19,6 +22,19 @@ interface ProjectConfig {
     gemini?: string;
     openai?: string;
     ollama?: string;
+  };
+}
+
+interface LocalConfig {
+  provider?: string;
+  selectedProvider?: string;
+  models?: ProjectConfig["models"];
+  apiKeys?: {
+    groq?: string;
+    anthropic?: string;
+    gemini?: string;
+    openai?: string;
+    ollamaHost?: string;
   };
 }
 
@@ -40,28 +56,18 @@ export function isConfiguredValue(value: string | undefined | null): boolean {
   return !PLACEHOLDER_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
-/**
- * Reads pr-review-orchestrator.config.json from the working repo and
- * applies provider + model settings as env defaults (only if not already set).
- * This lets each working repo control which AI provider and model to use
- * without any code changes to the library.
- */
-async function loadProjectConfig(rootDir: string): Promise<void> {
-  const configPath = path.join(rootDir, CONFIG_FILE);
-  let config: ProjectConfig;
-
+async function loadJsonFile<T>(filePath: string): Promise<T | null> {
   try {
-    const raw = await fs.readFile(configPath, "utf8");
-    config = JSON.parse(raw) as ProjectConfig;
+    const raw = await fs.readFile(filePath, "utf8");
+    return JSON.parse(raw) as T;
   } catch {
-    return; // no config file — that's fine
+    return null;
   }
+}
 
-  if (config.provider && !("PR_REVIEW_PROVIDER" in process.env)) {
-    process.env.PR_REVIEW_PROVIDER = config.provider;
-  }
+function applyModelDefaults(models: ProjectConfig["models"] | undefined): void {
+  if (!models) return;
 
-  const models = config.models ?? {};
   const modelMap: Record<string, string> = {
     groq: "GROQ_MODEL",
     anthropic: "ANTHROPIC_MODEL",
@@ -76,6 +82,49 @@ async function loadProjectConfig(rootDir: string): Promise<void> {
       process.env[envKey] = model;
     }
   }
+}
+
+async function loadProjectConfig(rootDir: string): Promise<void> {
+  const config =
+    await loadJsonFile<ProjectConfig>(path.join(rootDir, PROJECT_CONFIG_PATH)) ??
+    await loadJsonFile<ProjectConfig>(path.join(rootDir, LEGACY_CONFIG_FILE));
+
+  if (!config) return;
+
+  if (config.provider && !("PR_REVIEW_PROVIDER" in process.env)) {
+    process.env.PR_REVIEW_PROVIDER = config.provider;
+  }
+
+  applyModelDefaults(config.models);
+}
+
+async function loadLocalJsonConfig(rootDir: string): Promise<string[]> {
+  const filePath = path.join(rootDir, LOCAL_CONFIG_PATH);
+  const config = await loadJsonFile<LocalConfig>(filePath);
+  if (!config) return [];
+
+  if (config.provider && !("PR_REVIEW_PROVIDER" in process.env)) {
+    process.env.PR_REVIEW_PROVIDER = config.provider;
+  }
+
+  applyModelDefaults(config.models);
+
+  const apiKeys = config.apiKeys ?? {};
+  const keyMap: Record<string, string | undefined> = {
+    GROQ_API_KEY: apiKeys.groq,
+    ANTHROPIC_API_KEY: apiKeys.anthropic,
+    GEMINI_API_KEY: apiKeys.gemini,
+    OPENAI_API_KEY: apiKeys.openai,
+    OLLAMA_HOST: apiKeys.ollamaHost
+  };
+
+  for (const [envKey, value] of Object.entries(keyMap)) {
+    if (value && !(envKey in process.env)) {
+      process.env[envKey] = value;
+    }
+  }
+
+  return [filePath];
 }
 
 function stripWrappingQuotes(value: string): string {
@@ -104,9 +153,7 @@ function parseEnvFile(content: string): Record<string, string> {
     const key = normalized.slice(0, separatorIndex).trim();
     const value = stripWrappingQuotes(normalized.slice(separatorIndex + 1).trim());
 
-    if (key) {
-      values[key] = value;
-    }
+    if (key) values[key] = value;
   }
 
   return values;
@@ -115,7 +162,6 @@ function parseEnvFile(content: string): Record<string, string> {
 export async function loadProjectEnv(rootDir = process.cwd()): Promise<string[]> {
   const loadedFiles: string[] = [];
 
-  // .env files load first — they take priority over the config file
   for (const fileName of DEFAULT_ENV_FILES) {
     const filePath = path.join(rootDir, fileName);
 
@@ -132,14 +178,11 @@ export async function loadProjectEnv(rootDir = process.cwd()): Promise<string[]>
       loadedFiles.push(filePath);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT") {
-        throw error;
-      }
+      if (code !== "ENOENT") throw error;
     }
   }
 
-  // Config file loads last — fills in provider + model defaults not already set
-  // Priority: GitHub Secrets / CI env > .env files > pr-review-orchestrator.config.json
+  loadedFiles.push(...await loadLocalJsonConfig(rootDir));
   await loadProjectConfig(rootDir);
 
   return loadedFiles;

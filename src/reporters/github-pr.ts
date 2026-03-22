@@ -11,10 +11,10 @@ export interface GithubPRReviewReport {
 }
 
 const SEVERITY_BADGE: Record<string, string> = {
-  critical: "🔴 CRITICAL",
-  high: "🟠 HIGH",
-  medium: "🟡 MEDIUM",
-  low: "🔵 LOW"
+  critical: "CRITICAL",
+  high: "HIGH",
+  medium: "MEDIUM",
+  low: "LOW"
 };
 
 const AGENT_LABEL: Record<string, string> = {
@@ -23,6 +23,8 @@ const AGENT_LABEL: Record<string, string> = {
   logic: "Logic",
   types: "Type Safety",
   eslint: "Code Style",
+  performance: "Performance",
+  "best-practices": "Best Practices",
   quality: "Code Quality",
   fix: "Auto-Fix"
 };
@@ -35,7 +37,7 @@ function fenceBlock(code: string, lang = "ts"): string {
 
 function toGithubComment(comment: PRComment): GithubPRReviewReport["comments"][number] {
   const badge = SEVERITY_BADGE[comment.severity] ?? comment.severity.toUpperCase();
-  const agent = AGENT_LABEL[comment.labels.find((l) => Object.keys(AGENT_LABEL).includes(l)) ?? ""] ?? "Review";
+  const agent = AGENT_LABEL[comment.labels.find((label) => Object.keys(AGENT_LABEL).includes(label)) ?? ""] ?? "Review";
 
   const lines: string[] = [
     `## [${badge}] ${comment.title}`,
@@ -57,10 +59,10 @@ function toGithubComment(comment: PRComment): GithubPRReviewReport["comments"][n
   }
 
   if (comment.labels.length > 0) {
-    lines.push(`**Labels:** ${comment.labels.map((l) => `\`${l}\``).join(" ")}`, "");
+    lines.push(`**Labels:** ${comment.labels.map((label) => `\`${label}\``).join(" ")}`, "");
   }
 
-  lines.push(`---`, `*Reviewed by [pr-review-orchestrator](https://github.com/your-org/pr-review-orchestrator) · agent: ${agent.toLowerCase()}*`);
+  lines.push("---", `*Reviewed by [pr-review-orchestrator](https://github.com/your-org/pr-review-orchestrator) | agent: ${agent.toLowerCase()}*`);
 
   return {
     path: comment.file,

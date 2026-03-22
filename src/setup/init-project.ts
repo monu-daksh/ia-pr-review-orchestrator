@@ -2,6 +2,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { InstallProviderChoice } from "../types.js";
 
+const TOOL_DIR = "pr-review-orchestrator";
+const PROJECT_CONFIG_NAME = "config.json";
+const LOCAL_CONFIG_NAME = "local.json";
+
 interface InitOptions {
   targetDir?: string;
   ci?: "github" | "gitlab" | "both" | "none";
@@ -90,43 +94,32 @@ function getRequiredEnv(providerChoice: InstallProviderChoice): string | null {
   }
 }
 
-function buildAiConfig(providerChoice: InstallProviderChoice, model: string): string {
-  const providerMode = providerChoice === "local" ? "local" : "multi-agent";
-
-  return [
-    "# ---------------------------------------------------------------------------",
-    "# pr-review-orchestrator repository-local AI config",
-    "# This file is gitignored. Add your own API key and model here.",
-    `# Selected provider profile: ${providerChoice}`,
-    `# Selected model: ${model}`,
-    "# ---------------------------------------------------------------------------",
-    "",
-    `PR_REVIEW_PROVIDER=${providerMode}`,
-    "",
-    "# Free options for testing",
-    `${providerChoice === "groq" ? "" : "# "}GROQ_API_KEY=your_groq_api_key_here`,
-    `${providerChoice === "groq" ? "" : "# "}GROQ_MODEL=${providerChoice === "groq" ? model : getDefaultModel("groq")}`,
-    "",
-    `${providerChoice === "gemini" ? "" : "# "}GEMINI_API_KEY=your_gemini_api_key_here`,
-    `${providerChoice === "gemini" ? "" : "# "}GEMINI_MODEL=${providerChoice === "gemini" ? model : getDefaultModel("gemini")}`,
-    "",
-    `${providerChoice === "ollama" ? "" : "# "}OLLAMA_HOST=http://localhost:11434`,
-    `${providerChoice === "ollama" ? "" : "# "}OLLAMA_MODEL=${providerChoice === "ollama" ? model : getDefaultModel("ollama")}`,
-    "",
-    "# Paid upgrade options",
-    `${providerChoice === "anthropic" ? "" : "# "}ANTHROPIC_API_KEY=your_anthropic_api_key_here`,
-    `${providerChoice === "anthropic" ? "" : "# "}ANTHROPIC_MODEL=${providerChoice === "anthropic" ? model : getDefaultModel("anthropic")}`,
-    "",
-    `${providerChoice === "openai" ? "" : "# "}OPENAI_API_KEY=your_openai_api_key_here`,
-    `${providerChoice === "openai" ? "" : "# "}OPENAI_MODEL=${providerChoice === "openai" ? model : getDefaultModel("openai")}`,
-    "",
-    "# Local rules-only mode",
-    `${providerChoice === "local" ? "" : "# "}LOCAL_REVIEW_MODE=rules-only`,
-    ""
-  ].join("\n");
+function buildLocalConfig(providerChoice: InstallProviderChoice, model: string): string {
+  return JSON.stringify(
+    {
+      provider: providerChoice === "local" ? "local" : "multi-agent",
+      selectedProvider: providerChoice,
+      models: {
+        groq: providerChoice === "groq" ? model : getDefaultModel("groq"),
+        anthropic: providerChoice === "anthropic" ? model : getDefaultModel("anthropic"),
+        gemini: providerChoice === "gemini" ? model : getDefaultModel("gemini"),
+        openai: providerChoice === "openai" ? model : getDefaultModel("openai"),
+        ollama: providerChoice === "ollama" ? model : getDefaultModel("ollama")
+      },
+      apiKeys: {
+        groq: providerChoice === "groq" ? "your_groq_api_key_here" : "",
+        gemini: providerChoice === "gemini" ? "your_gemini_api_key_here" : "",
+        anthropic: providerChoice === "anthropic" ? "your_anthropic_api_key_here" : "",
+        openai: providerChoice === "openai" ? "your_openai_api_key_here" : "",
+        ollamaHost: providerChoice === "ollama" ? "http://localhost:11434" : ""
+      }
+    },
+    null,
+    2
+  ) + "\n";
 }
 
-function buildConfig(repoTypes: string[], providerChoice: InstallProviderChoice, model: string): string {
+function buildProjectConfig(repoTypes: string[], providerChoice: InstallProviderChoice, model: string): string {
   const include = repoTypes.includes("react")
     ? ["src", "app", "components", "pages", "server", "api"]
     : repoTypes.includes("python")
@@ -139,23 +132,19 @@ function buildConfig(repoTypes: string[], providerChoice: InstallProviderChoice,
     {
       provider: providerChoice === "local" ? "local" : "multi-agent",
       install: {
+        toolDirectory: TOOL_DIR,
+        localConfigFile: `${TOOL_DIR}/${LOCAL_CONFIG_NAME}`,
+        projectConfigFile: `${TOOL_DIR}/${PROJECT_CONFIG_NAME}`,
         providerChoice,
         selectedModel: model,
         requiredEnv: getRequiredEnv(providerChoice)
       },
-      models: {
-        groq: providerChoice === "groq" ? model : getDefaultModel("groq"),
-        anthropic: providerChoice === "anthropic" ? model : getDefaultModel("anthropic"),
-        gemini: providerChoice === "gemini" ? model : getDefaultModel("gemini"),
-        openai: providerChoice === "openai" ? model : getDefaultModel("openai"),
-        ollama: providerChoice === "ollama" ? model : getDefaultModel("ollama")
-      },
-      ci: {
-        failOnSeverity: []
-      },
       review: {
         includePaths: include,
         maxContextLines: 12
+      },
+      ci: {
+        failOnSeverity: []
       },
       repo: {
         detectedTypes: repoTypes
@@ -163,7 +152,7 @@ function buildConfig(repoTypes: string[], providerChoice: InstallProviderChoice,
     },
     null,
     2
-  );
+  ) + "\n";
 }
 
 function buildGithubWorkflow(): string {
@@ -173,9 +162,6 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
-  push:
-    branches:
-      - "**"
 
 permissions:
   contents: read
@@ -212,18 +198,13 @@ jobs:
           GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: \${{ github.repository }}
         run: |
-          if [ "\${{ github.event_name }}" = "pull_request" ]; then
-            git diff origin/\${{ github.base_ref }}...HEAD > pr.diff
-          else
-            git diff HEAD~1...HEAD > pr.diff
-          fi
+          git diff origin/\${{ github.base_ref }}...HEAD > pr.diff
           npx pr-review-orchestrator review --diff ./pr.diff --format github-pr > review.json
 
       - name: Print review summary
         run: node -e "const r=JSON.parse(require('fs').readFileSync('review.json','utf8')); console.log(r.reports?.markdown_summary ?? 'No summary generated');"
 
       - name: Post PR Review Comments
-        if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
@@ -273,15 +254,9 @@ pr_review:
   stage: review
   only:
     - merge_requests
-    - branches
   script:
     - npm ci
-    - |
-      if [ -n "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" ]; then
-        git diff origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME...HEAD > pr.diff
-      else
-        git diff HEAD~1...HEAD > pr.diff
-      fi
+    - git diff origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME...HEAD > pr.diff
     - npx pr-review-orchestrator review --diff ./pr.diff --format github-pr > review.json
     - cat review.json
   artifacts:
@@ -324,7 +299,15 @@ async function updatePackageJson(rootDir: string, installSource: string, result:
 
 async function updateGitIgnore(rootDir: string, result: InitResult): Promise<void> {
   const gitIgnorePath = path.join(rootDir, ".gitignore");
-  const entries = [".env", ".env.local", ".env.*.local", ".pr-review-orchestrator", "pr.diff", "review.json"];
+  const entries = [
+    ".env",
+    ".env.local",
+    ".env.*.local",
+    `${TOOL_DIR}/${LOCAL_CONFIG_NAME}`,
+    ".pr-review-orchestrator",
+    "pr.diff",
+    "review.json"
+  ];
   const existing = (await pathExists(gitIgnorePath)) ? await fs.readFile(gitIgnorePath, "utf8") : "";
 
   const lines = new Set(
@@ -357,16 +340,17 @@ export async function initProject(options: InitOptions = {}): Promise<InitResult
   const ci = options.ci || "github";
   const providerChoice = options.providerChoice ?? "groq";
   const model = options.model ?? getDefaultModel(providerChoice);
+  const toolDirPath = path.join(rootDir, TOOL_DIR);
 
   await writeFileIfMissing(
-    path.join(rootDir, ".pr-review-orchestrator"),
-    buildAiConfig(providerChoice, model),
+    path.join(toolDirPath, LOCAL_CONFIG_NAME),
+    buildLocalConfig(providerChoice, model),
     result
   );
 
   await writeFileIfMissing(
-    path.join(rootDir, "pr-review-orchestrator.config.json"),
-    buildConfig(repoTypes, providerChoice, model),
+    path.join(toolDirPath, PROJECT_CONFIG_NAME),
+    buildProjectConfig(repoTypes, providerChoice, model),
     result
   );
 
@@ -392,3 +376,6 @@ export async function initProject(options: InitOptions = {}): Promise<InitResult
 
   return result;
 }
+
+
+

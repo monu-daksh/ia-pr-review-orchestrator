@@ -1,0 +1,27 @@
+{
+  "provider": "multi-agent",
+  "install": {
+    "toolDirectory": "pr-review-orchestrator",
+    "localConfigFile": "pr-review-orchestrator/local.json",
+    "projectConfigFile": "pr-review-orchestrator/config.json",
+    "providerChoice": "groq",
+    "selectedModel": "llama-3.3-70b-versatile",
+    "requiredEnv": "GROQ_API_KEY"
+  },
+  "review": {
+    "includePaths": [
+      "src",
+      "server",
+      "api"
+    ],
+    "maxContextLines": 12
+  },
+  "ci": {
+    "failOnSeverity": []
+  },
+  "repo": {
+    "detectedTypes": [
+      "node"
+    ]
+  }
+}
