@@ -13,22 +13,27 @@ export interface GithubPRReviewReport {
 }
 
 const SEVERITY_BADGE: Record<string, string> = {
-  critical: "CRITICAL",
-  high: "HIGH",
-  medium: "MEDIUM",
-  low: "LOW"
+  critical: "🔴 CRITICAL",
+  high: "🟠 HIGH",
+  medium: "🟡 MEDIUM",
+  low: "🔵 LOW"
+};
+
+const DECISION_BADGE: Record<string, string> = {
+  approve: "✅ Approve",
+  request_changes: "🚫 Request Changes"
 };
 
 const AGENT_LABEL: Record<string, string> = {
-  security: "Security Agent",
-  bug: "Bug Agent",
-  logic: "Logic Agent",
-  types: "Type Agent",
-  eslint: "ESLint Agent",
-  performance: "Performance Agent",
-  "best-practices": "Best Practices Agent",
-  quality: "Quality Agent",
-  fix: "Fix Agent"
+  security: "🛡️ Security Agent",
+  bug: "🐛 Bug Agent",
+  logic: "🧠 Logic Agent",
+  types: "📐 Type Agent",
+  eslint: "🔍 ESLint Agent",
+  performance: "⚡ Performance Agent",
+  "best-practices": "✅ Best Practices Agent",
+  quality: "🏗️ Quality Agent",
+  fix: "🔧 Fix Agent"
 };
 
 function fenceBlock(code: string, lang = "ts"): string {
@@ -54,18 +59,20 @@ function toGithubComment(review: ReviewResult, comment: PRComment): GithubPRRevi
   const lines: string[] = [
     `## [${badge}] ${comment.title}`,
     "",
-    `**Agent:** ${agent}`,
-    `**File:** \`${comment.file}\``,
-    `**Line:** ${comment.line}`,
+    `| | |`,
+    `|---|---|`,
+    `| **Agent** | ${agent} |`,
+    `| **File** | \`${comment.file}\` |`,
+    `| **Line** | ${comment.line} |`,
     ""
   ];
 
   if (comment.issue) {
-    lines.push("**Issue**", comment.issue, "");
+    lines.push("**🔎 Issue**", "", comment.issue, "");
   }
 
   if (comment.corrected_code?.trim()) {
-    lines.push("**Fix**", fenceBlock(comment.corrected_code), "");
+    lines.push("**🔧 Suggested Fix**", "", fenceBlock(comment.corrected_code), "");
   }
 
   return {
@@ -83,21 +90,22 @@ function buildSummaryComment(review: ReviewResult): string {
       .filter((comment): comment is GithubPRReviewReport["comments"][number] => comment !== null)
       .map((comment) => `${comment.path}:${comment.line}:${comment.body}`)
   );
+  const decision = DECISION_BADGE[review.summary.final_decision] ?? review.summary.final_decision;
   const lines = [
-    "## PR Review Orchestrator",
+    "## 🔍 PR Review Orchestrator",
     "",
-    `**Decision:** ${review.summary.final_decision}`,
-    `**Total issues:** ${review.summary.total_issues}`,
-    `**Severity:** Critical ${review.summary.critical_count} | High ${review.summary.high_count} | Medium ${review.summary.medium_count} | Low ${review.summary.low_count}`,
+    "| Decision | Issues | 🔴 Critical | 🟠 High | 🟡 Medium | 🔵 Low |",
+    "|---|---|---|---|---|---|",
+    `| ${decision} | ${review.summary.total_issues} | ${review.summary.critical_count} | ${review.summary.high_count} | ${review.summary.medium_count} | ${review.summary.low_count} |`,
     ""
   ];
 
   if (review.reports.pr_comments.length === 0) {
-    lines.push("No findings were generated.");
+    lines.push("✅ No findings were generated.");
     return lines.join("\n");
   }
 
-  lines.push("### Findings", "");
+  lines.push("### 📋 Findings", "");
 
   for (const comment of review.reports.pr_comments.slice(0, 20)) {
     const badge = SEVERITY_BADGE[comment.severity] ?? comment.severity.toUpperCase();
@@ -105,18 +113,21 @@ function buildSummaryComment(review: ReviewResult): string {
     const inlineVersion = toGithubComment(review, comment);
     const isInline = inlineVersion ? inlineKeys.has(`${inlineVersion.path}:${inlineVersion.line}:${inlineVersion.body}`) : false;
 
-    lines.push(`#### [${badge}] ${comment.title}`);
-    lines.push(`- Agent: ${agent}`);
-    lines.push(`- File: \`${comment.file}\``);
-    lines.push(`- Line: ${comment.line}`);
-    lines.push(`- Placement: ${isInline ? "Inline comment" : "Summary only"}`);
-    lines.push(`- Issue: ${comment.issue}`);
+    lines.push(`<details>`);
+    lines.push(`<summary><strong>[${badge}] ${comment.title}</strong> — ${agent} · <code>${comment.file}:${comment.line}</code></summary>`);
+    lines.push("");
+    lines.push(`**Issue:** ${comment.issue}`);
+    lines.push("");
+    lines.push(`**Placement:** ${isInline ? "📌 Inline comment" : "📄 Summary only"}`);
 
     if (comment.corrected_code?.trim()) {
-      lines.push("- Fix:");
+      lines.push("");
+      lines.push("**🔧 Suggested Fix:**");
       lines.push(fenceBlock(comment.corrected_code));
     }
 
+    lines.push("");
+    lines.push("</details>");
     lines.push("");
   }
 
