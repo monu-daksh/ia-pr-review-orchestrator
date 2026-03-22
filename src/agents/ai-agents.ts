@@ -53,7 +53,8 @@ function buildCodeContext(file: TriagedFile): string {
 
 const JSON_INSTRUCTION = `
 Respond ONLY with valid JSON in this exact format - no markdown fences, no prose:
-{"issues":[{"line":<number>,"title":"<string>","message":"<string>","severity":"critical|high|medium|low","code_snippet":"<string>","suggestion":"<string>"}]}
+{"issues":[{"line":<number>,"title":"<string>","message":"<string>","severity":"critical|high|medium|low","code_snippet":"<string>","suggestion":"<string>","fix":"<string>"}]}
+When possible, provide a concrete corrected code snippet in "fix". Do not return generic advice if you can show an exact code change.
 If there are no issues, return: {"issues":[]}`.trim();
 
 const AGENT_SPECS: AgentSpec[] = [
@@ -91,6 +92,7 @@ ${JSON_INSTRUCTION}`
     system: `You are a senior software engineer performing a focused logic review.
 Analyze ONLY for logic issues: wrong conditionals, missing edge cases, incorrect algorithms,
 incorrect state transitions, invalid assumptions, and wrong business behavior.
+Do NOT report security issues from this agent.
 ${JSON_INSTRUCTION}`
   },
   {
@@ -102,6 +104,7 @@ ${JSON_INSTRUCTION}`
     system: `You are a TypeScript and static typing expert performing a focused type-safety review.
 Analyze ONLY for unsafe any usage, unsafe casts, missing null checks, type mismatches,
 and public APIs that are too weakly typed.
+Do NOT report security or performance issues from this agent.
 ${JSON_INSTRUCTION}`
   },
   {
@@ -113,6 +116,7 @@ ${JSON_INSTRUCTION}`
     system: `You are a linting and style expert performing a focused static review.
 Analyze ONLY for lint-rule violations, dead code, console statements in production paths,
 and highly likely style or consistency problems.
+Do NOT report security or performance issues from this agent.
 ${JSON_INSTRUCTION}`
   },
   {
@@ -125,6 +129,7 @@ ${JSON_INSTRUCTION}`
 Analyze ONLY for performance risks: expensive work in render paths, repeated heavy computation,
 blocking synchronous work, unnecessary sorting/filtering in hot code, N+1 style data fetching,
 and avoidable large object creation inside loops.
+Do NOT report security issues from this agent.
 ${JSON_INSTRUCTION}`
   },
   {
@@ -136,6 +141,7 @@ ${JSON_INSTRUCTION}`
     system: `You are a senior reviewer focused on engineering best practices.
 Analyze ONLY for maintainability and best-practice issues: missing validation, hidden assumptions,
 unsafe suppression comments, poor separation of concerns, and patterns that teams usually regret later.
+Do NOT report direct security issues from this agent if the security agent would own them.
 ${JSON_INSTRUCTION}`
   },
   {
@@ -147,6 +153,7 @@ ${JSON_INSTRUCTION}`
     system: `You are a software architect performing a focused code quality review.
 Analyze ONLY for maintainability issues: duplicated logic, confusing naming, tight coupling,
 poor readability, and patterns that will be hard to test or extend.
+Do NOT report direct security issues from this agent if the security agent would own them.
 ${JSON_INSTRUCTION}`
   }
 ];

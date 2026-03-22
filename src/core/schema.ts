@@ -1,4 +1,95 @@
-import type { FileFindingSummary, NormalizedFinding, ReviewIssue, ReviewResult, SecurityIssue } from "../types.js";
+import type { FileFindingSummary, NormalizedFinding, PRComment, ReviewIssue, ReviewResult, SecurityIssue } from "../types.js";
+
+const SEVERITY_RANK = {
+  critical: 4,
+  high: 3,
+  medium: 2,
+  low: 1
+} as const;
+
+function normalizeText(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function canonicalTopic(issue: ReviewIssue | SecurityIssue): string {
+  const text = normalizeText(`${issue.title} ${issue.message} ${issue.code_snippet}`);
+
+  if (text.includes("dangerouslysetinnerhtml") || text.includes("xss")) return "xss";
+  if (
+    text.includes("secret") ||
+    text.includes("api key") ||
+    text.includes("token") ||
+    text.includes("password") ||
+    text.includes("private key")
+  ) return "secret-exposure";
+  if (text.includes("console") && (text.includes("secret") || text.includes("token") || text.includes("password"))) {
+    return "secret-exposure";
+  }
+  if (text.includes("sql") || text.includes("query") && text.includes("injection")) return "sql-injection";
+  if (text.includes("expensive") || text.includes("render") || text.includes("computation")) return "performance-hot-path";
+  if (text.includes("any") || text.includes("type")) return "type-safety";
+  if (text.includes("console")) return "console-logging";
+  if (text.includes("redirect")) return "redirect";
+
+  return normalizeText(issue.title);
+}
+
+function shouldReplaceIssue(current: ReviewIssue | SecurityIssue, existing: ReviewIssue | SecurityIssue): boolean {
+  const currentRank = SEVERITY_RANK[current.severity];
+  const existingRank = SEVERITY_RANK[existing.severity];
+  const currentSecurity = current.category === "security" ? 1 : 0;
+  const existingSecurity = existing.category === "security" ? 1 : 0;
+  const currentHasFix = getCorrectedCode(current) ? 1 : 0;
+  const existingHasFix = getCorrectedCode(existing) ? 1 : 0;
+
+  return (
+    currentRank > existingRank ||
+    (currentRank === existingRank && currentSecurity > existingSecurity) ||
+    (currentRank === existingRank && currentSecurity === existingSecurity && currentHasFix > existingHasFix) ||
+    (
+      currentRank === existingRank &&
+      currentSecurity === existingSecurity &&
+      currentHasFix === existingHasFix &&
+      current.confidence > existing.confidence
+    )
+  );
+}
+
+function dedupeIssues(issues: Array<ReviewIssue | SecurityIssue>): Array<ReviewIssue | SecurityIssue> {
+  const chosen: Array<ReviewIssue | SecurityIssue> = [];
+
+  for (const issue of issues) {
+    const topic = canonicalTopic(issue);
+    const snippet = normalizeText(issue.code_snippet);
+
+    const existingIndex = chosen.findIndex((existing) => {
+      const sameFile = existing.file === issue.file;
+      const sameTopic = canonicalTopic(existing) === topic;
+      const closeLine = Math.abs(existing.line - issue.line) <= 2;
+      const sameSnippet = normalizeText(existing.code_snippet) === snippet;
+      return sameFile && sameTopic && (sameSnippet || closeLine);
+    });
+
+    if (existingIndex === -1) {
+      chosen.push(issue);
+      continue;
+    }
+
+    if (shouldReplaceIssue(issue, chosen[existingIndex])) {
+      chosen[existingIndex] = issue;
+    }
+  }
+
+  return chosen.sort((left, right) => left.file.localeCompare(right.file) || left.line - right.line);
+}
+
+function dedupeReviewResult(reviewResult: ReviewResult): void {
+  for (const file of reviewResult.files) {
+    const deduped = dedupeIssues([...file.review.issues, ...file.security.vulnerabilities]);
+    file.review.issues = deduped.filter((issue): issue is ReviewIssue => issue.category !== "security");
+    file.security.vulnerabilities = deduped.filter((issue): issue is SecurityIssue => issue.category === "security");
+  }
+}
 
 function getCorrectedCode(issue: ReviewIssue | SecurityIssue): string | undefined {
   if ("corrected_code" in issue && issue.corrected_code) return issue.corrected_code;
@@ -21,6 +112,24 @@ function toFinding(issue: ReviewIssue | SecurityIssue): NormalizedFinding {
     corrected_code: getCorrectedCode(issue),
     labels: issue.labels,
     confidence: issue.confidence
+  };
+}
+
+function toComment(issue: ReviewIssue | SecurityIssue): PRComment {
+  const correctedCode = getCorrectedCode(issue) ?? "";
+
+  return {
+    id: issue.id,
+    file: issue.file,
+    line: issue.line,
+    severity: issue.severity,
+    category: issue.category,
+    title: issue.title,
+    issue: issue.message,
+    code_snippet: issue.code_snippet,
+    corrected_code: correctedCode,
+    labels: issue.labels,
+    body: ""
   };
 }
 
@@ -68,6 +177,9 @@ function buildMarkdownSummary(reviewResult: ReviewResult): string {
 }
 
 function hydrateDerivedReports(reviewResult: ReviewResult): void {
+  reviewResult.reports.pr_comments = reviewResult.files.flatMap((file) =>
+    [...file.review.issues, ...file.security.vulnerabilities].map((issue) => toComment(issue))
+  );
   reviewResult.reports.findings = reviewResult.files.flatMap((file) =>
     [...file.review.issues, ...file.security.vulnerabilities].map((issue) => toFinding(issue))
   );
@@ -119,6 +231,8 @@ export function createEmptyReview(files: Array<{ file: string; language: string 
 }
 
 export function finalizeSummary(reviewResult: ReviewResult): ReviewResult {
+  dedupeReviewResult(reviewResult);
+
   let totalIssues = 0;
   let critical = 0;
   let high = 0;

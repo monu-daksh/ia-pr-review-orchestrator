@@ -148,7 +148,7 @@ async function runReview(): Promise<void> {
 async function runInit(): Promise<void> {
   const ci = (getArg("--ci") || "github") as "github" | "gitlab" | "both" | "none";
   const targetDir = getArg("--cwd");
-  const installSource = getArg("--install-source") ?? "latest";
+  const installSource = getArg("--install-source");
   const providerArg = getArg("--provider") as InstallProviderChoice | undefined;
   const modelArg = getArg("--model");
   const selection = providerArg

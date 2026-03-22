@@ -257,7 +257,7 @@ async function updatePackageJson(rootDir: string, installSource: string, result:
   packageJson.scripts ??= {};
   packageJson.devDependencies ??= {};
 
-  if (!packageJson.devDependencies["pr-review-orchestrator"]) {
+  if (installSource && !packageJson.devDependencies["pr-review-orchestrator"]) {
     packageJson.devDependencies["pr-review-orchestrator"] = installSource;
   }
 
@@ -342,9 +342,10 @@ export async function initProject(options: InitOptions = {}): Promise<InitResult
     );
   }
 
-  const installSource = options.installSource ?? "latest";
+  const installSource = options.installSource ?? "";
   await updatePackageJson(rootDir, installSource, result);
   await updateGitIgnore(rootDir, result);
 
   return result;
 }
+
