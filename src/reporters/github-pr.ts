@@ -8,6 +8,7 @@ export interface GithubPRReviewReport {
     severity: string;
     body: string;
   }>;
+  summary_comment: string;
 }
 
 const SEVERITY_BADGE: Record<string, string> = {
@@ -80,11 +81,36 @@ function toGithubComment(review: ReviewResult, comment: PRComment): GithubPRRevi
   };
 }
 
+function buildSummaryComment(review: ReviewResult): string {
+  const lines = [
+    "## PR Review Orchestrator",
+    "",
+    `Decision: ${review.summary.final_decision}`,
+    `Total issues: ${review.summary.total_issues}`,
+    `Critical: ${review.summary.critical_count} | High: ${review.summary.high_count} | Medium: ${review.summary.medium_count} | Low: ${review.summary.low_count}`,
+    ""
+  ];
+
+  if (review.reports.pr_comments.length === 0) {
+    lines.push("No findings were generated.");
+    return lines.join("\n");
+  }
+
+  lines.push("Findings:", "");
+
+  for (const comment of review.reports.pr_comments.slice(0, 20)) {
+    lines.push(`- ${comment.file}:${comment.line} [${comment.severity.toUpperCase()}] ${comment.title} (${AGENT_LABEL[comment.agent] ?? comment.agent})`);
+  }
+
+  return lines.join("\n");
+}
+
 export function buildGithubPRReviewReport(review: ReviewResult): GithubPRReviewReport {
   return {
     summary: review.summary,
     comments: review.reports.pr_comments
       .map((comment) => toGithubComment(review, comment))
-      .filter((comment): comment is GithubPRReviewReport["comments"][number] => comment !== null)
+      .filter((comment): comment is GithubPRReviewReport["comments"][number] => comment !== null),
+    summary_comment: buildSummaryComment(review)
   };
 }
