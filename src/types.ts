@@ -29,6 +29,7 @@ export interface ParsedDiffFile {
   defaultAreas: string[];
   addedLines: AddedLine[];
   contextLines: ContextLine[];
+  fullFileLines?: ContextLine[];
 }
 
 export interface TriageResult {
@@ -174,6 +175,7 @@ export interface PromptPayload {
       change_type: string;
       added_lines: AddedLine[];
       context_preview: ContextLine[];
+      full_file_lines?: ContextLine[];
     }>;
   };
 }

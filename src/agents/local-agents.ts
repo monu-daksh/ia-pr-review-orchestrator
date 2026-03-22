@@ -17,6 +17,8 @@ interface AgentOutput {
   changesSummary: string[];
 }
 
+type ReviewLine = { line: number; content: string };
+
 function createOutput(): AgentOutput {
   return {
     reviewIssues: [],
@@ -35,6 +37,10 @@ function buildFixedCode(file: TriagedFile, patches: Patch[]): string {
   }
 
   return file.addedLines.map((line) => patchByLine.get(line.line) ?? line.content).join("\n");
+}
+
+function getReviewLines(file: TriagedFile): ReviewLine[] {
+  return file.fullFileLines?.length ? file.fullFileLines : file.addedLines;
 }
 
 function buildComment(issue: ReviewIssue | SecurityIssue): PRComment {
@@ -71,7 +77,7 @@ function buildComment(issue: ReviewIssue | SecurityIssue): PRComment {
 function runSecurityAgent(file: TriagedFile): AgentOutput {
   const output = createOutput();
 
-  for (const addedLine of file.addedLines) {
+  for (const addedLine of getReviewLines(file)) {
     if (/dangerouslySetInnerHTML/.test(addedLine.content)) {
       const fixed = addedLine.content.replace(
         /<div dangerouslySetInnerHTML=\{\{ __html: ([^}]+) \}\} \/>/,
@@ -141,7 +147,7 @@ function runSecurityAgent(file: TriagedFile): AgentOutput {
 function runBugAgent(file: TriagedFile): AgentOutput {
   const output = createOutput();
 
-  for (const addedLine of file.addedLines) {
+  for (const addedLine of getReviewLines(file)) {
     if (/fetch\(/.test(addedLine.content) && !/await /.test(addedLine.content)) {
       output.reviewIssues.push({
         id: `R-${file.file}-${addedLine.line}-fetch`,
@@ -167,7 +173,7 @@ function runBugAgent(file: TriagedFile): AgentOutput {
 function runLogicAgent(file: TriagedFile): AgentOutput {
   const output = createOutput();
 
-  for (const addedLine of file.addedLines) {
+  for (const addedLine of getReviewLines(file)) {
     if (/db\.query\(sql\)/.test(addedLine.content) && !/\[id\]/.test(addedLine.content)) {
       output.reviewIssues.push({
         id: `R-${file.file}-${addedLine.line}-logic`,
@@ -193,7 +199,7 @@ function runLogicAgent(file: TriagedFile): AgentOutput {
 function runTypesAgent(file: TriagedFile): AgentOutput {
   const output = createOutput();
 
-  for (const addedLine of file.addedLines) {
+  for (const addedLine of getReviewLines(file)) {
     if (/\bcatch\s*\(\s*error\s*\)/.test(addedLine.content) && !/unknown/.test(addedLine.content)) {
       output.reviewIssues.push({
         id: `R-${file.file}-${addedLine.line}-catch-type`,
@@ -219,7 +225,7 @@ function runTypesAgent(file: TriagedFile): AgentOutput {
 function runEslintAgent(file: TriagedFile): AgentOutput {
   const output = createOutput();
 
-  for (const addedLine of file.addedLines) {
+  for (const addedLine of getReviewLines(file)) {
     if (/console\.(log|error)\(/.test(addedLine.content)) {
       output.reviewIssues.push({
         id: `R-${file.file}-${addedLine.line}-eslint-console`,
@@ -263,7 +269,7 @@ function runEslintAgent(file: TriagedFile): AgentOutput {
 function runPerformanceAgent(file: TriagedFile): AgentOutput {
   const output = createOutput();
 
-  for (const addedLine of file.addedLines) {
+  for (const addedLine of getReviewLines(file)) {
     if (/\.sort\(/.test(addedLine.content) || /\.reverse\(/.test(addedLine.content)) {
       output.reviewIssues.push({
         id: `R-${file.file}-${addedLine.line}-performance-sort`,
@@ -289,7 +295,7 @@ function runPerformanceAgent(file: TriagedFile): AgentOutput {
 function runBestPracticesAgent(file: TriagedFile): AgentOutput {
   const output = createOutput();
 
-  for (const addedLine of file.addedLines) {
+  for (const addedLine of getReviewLines(file)) {
     if (/@ts-ignore/.test(addedLine.content)) {
       output.reviewIssues.push({
         id: `R-${file.file}-${addedLine.line}-best-practices-ignore`,
@@ -333,7 +339,7 @@ function runBestPracticesAgent(file: TriagedFile): AgentOutput {
 function runQualityAgent(file: TriagedFile): AgentOutput {
   const output = createOutput();
 
-  for (const addedLine of file.addedLines) {
+  for (const addedLine of getReviewLines(file)) {
     if (/\bany\b/.test(addedLine.content)) {
       output.reviewIssues.push({
         id: `R-${file.file}-${addedLine.line}-typing`,

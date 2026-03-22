@@ -5,12 +5,19 @@ import { triageFile } from "./triage.js";
 import { createProvider } from "../providers/index.js";
 import type { DryRunResult, ReviewOptions, ReviewResult, TriagedFile } from "../types.js";
 import { loadProjectEnv } from "../utils/env.js";
+import { readWorkingTreeFileLines } from "../utils/fs.js";
 
 export async function reviewDiff(diffText: string, options: ReviewOptions = {}): Promise<ReviewResult | DryRunResult> {
   await loadProjectEnv();
 
   const parsedFiles = parseUnifiedDiff(diffText);
-  const triaged: TriagedFile[] = parsedFiles.map((file) => ({
+  const enrichedFiles = await Promise.all(
+    parsedFiles.map(async (file) => ({
+      ...file,
+      fullFileLines: await readWorkingTreeFileLines(file.file)
+    }))
+  );
+  const triaged: TriagedFile[] = enrichedFiles.map((file) => ({
     ...file,
     triage: triageFile(file)
   }));

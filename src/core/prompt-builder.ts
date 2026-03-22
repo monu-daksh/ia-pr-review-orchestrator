@@ -7,7 +7,8 @@ export function buildPromptPayload(files: TriagedFile[]): PromptPayload {
     language: file.language,
     change_type: file.changeType,
     added_lines: file.addedLines,
-    context_preview: file.contextLines.slice(-12)
+    context_preview: file.contextLines.slice(-12),
+    full_file_lines: file.fullFileLines?.length ? file.fullFileLines : undefined
   }));
 
   return {

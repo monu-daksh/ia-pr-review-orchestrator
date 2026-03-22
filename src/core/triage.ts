@@ -12,7 +12,8 @@ const AREA_PATTERNS: Array<{ area: string; regex: RegExp }> = [
 ];
 
 export function triageFile(file: ParsedDiffFile): TriageResult {
-  const addedText = file.addedLines.map((item) => item.content).join("\n");
+  const reviewSource = file.fullFileLines?.length ? file.fullFileLines : file.addedLines;
+  const addedText = reviewSource.map((item) => item.content).join("\n");
   const dynamicAreas = AREA_PATTERNS
     .filter((item) => item.regex.test(addedText))
     .map((item) => item.area);
@@ -30,7 +31,7 @@ export function triageFile(file: ParsedDiffFile): TriageResult {
     verdict:
       file.addedLines.length === 0
         ? "No added lines detected."
-        : `Review ${file.addedLines.length} added lines in ${file.language} with ${riskLevel} risk.`
+        : `Review touched file ${file.file} in ${file.language} with ${riskLevel} risk.`
   };
 }
 

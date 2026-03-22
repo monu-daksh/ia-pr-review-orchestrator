@@ -95,15 +95,21 @@ function issueBelongsToAgent(agent: Exclude<AgentName, "fix">, issue: AIReviewIs
 }
 
 function buildCodeContext(file: TriagedFile): string {
-  const lines = file.addedLines.map((line) => `${line.line}: ${line.content}`).join("\n");
+  const changedLines = file.addedLines.map((line) => `${line.line}: ${line.content}`).join("\n");
+  const fullFileLines = (file.fullFileLines?.length ? file.fullFileLines : file.contextLines)
+    .map((line) => `${line.line}: ${line.content}`)
+    .join("\n");
   return [
     `File: ${file.file}`,
     `Language: ${file.language}`,
     `Risk level: ${file.triage.risk_level}`,
     `Areas of concern: ${file.triage.areas_of_concern.join(", ") || "general"}`,
     "",
-    "Added lines in this PR:",
-    lines || "(no added lines)"
+    "Changed lines in this PR:",
+    changedLines || "(no added lines)",
+    "",
+    "Current full file content:",
+    fullFileLines || "(file content unavailable)"
   ].join("\n");
 }
 
