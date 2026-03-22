@@ -129,93 +129,118 @@ function buildInitConfig(repoTypes: string[], providerChoice: InstallProviderCho
 }
 
 function buildGithubWorkflow(): string {
-  return `name: PR Review Orchestrator
-
-on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-  push:
-    branches: [main, master]
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-
-jobs:
-  review:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Run AI review
-        env:
-          GROQ_API_KEY: \${{ secrets.GROQ_API_KEY }}
-          GEMINI_API_KEY: \${{ secrets.GEMINI_API_KEY }}
-          ANTHROPIC_API_KEY: \${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: \${{ secrets.OPENAI_API_KEY }}
-          OLLAMA_HOST: \${{ secrets.OLLAMA_HOST }}
-          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: \${{ github.repository }}
-        run: |
-          if [ "\${{ github.event_name }}" = "pull_request" ]; then
-            git diff origin/\${{ github.base_ref }}...HEAD > pr.diff
-          else
-            git diff HEAD~1...HEAD > pr.diff
-          fi
-          npx pr-review-orchestrator review --diff ./pr.diff --format github-pr > review.json
-
-      - name: Print review summary
-        run: node -e "const r=JSON.parse(require('fs').readFileSync('review.json','utf8')); console.log(r.reports?.markdown_summary ?? 'No summary generated');"
-
-      - name: Post PR Review Comments
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const review = JSON.parse(fs.readFileSync('review.json', 'utf8'));
-            const comments = Array.isArray(review.comments) ? review.comments : [];
-
-            if (comments.length > 0) {
-              await github.rest.pulls.createReview({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: context.payload.pull_request.number,
-                commit_id: context.payload.pull_request.head.sha,
-                event: 'COMMENT',
-                comments: comments.map((c) => ({
-                  path: c.path,
-                  line: c.line,
-                  side: 'RIGHT',
-                  body: c.body
-                }))
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.payload.pull_request.number,
-                body: review.reports?.markdown_summary || 'PR Review Orchestrator: no findings in this diff.'
-              });
-            }
-
-      - name: Upload review artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: pr-review-json
-          path: review.json
-`;
+  return [
+    "name: PR Review Orchestrator",
+    "",
+    "on:",
+    "  pull_request:",
+    "    types: [opened, synchronize, reopened]",
+    "  push:",
+    "    branches: [main, master]",
+    "  workflow_dispatch:",
+    "",
+    "permissions:",
+    "  contents: read",
+    "  pull-requests: write",
+    "  issues: write",
+    "",
+    "jobs:",
+    "  review:",
+    "    runs-on: ubuntu-latest",
+    "    steps:",
+    "      - uses: actions/checkout@v4",
+    "        with:",
+    "          fetch-depth: 0",
+    "",
+    "      - uses: actions/setup-node@v4",
+    "        with:",
+    "          node-version: 20",
+    "",
+    "      - name: Install dependencies",
+    "        run: npm install",
+    "",
+    "      - name: Run AI review",
+    "        env:",
+    "          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}",
+    "          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}",
+    "          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}",
+    "          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}",
+    "          OLLAMA_HOST: ${{ secrets.OLLAMA_HOST }}",
+    "          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+    "          GITHUB_REPOSITORY: ${{ github.repository }}",
+    "        run: |",
+    "          if [ \"${{ github.event_name }}\" = \"pull_request\" ]; then",
+    "            git diff origin/${{ github.base_ref }}...HEAD > pr.diff",
+    "          else",
+    "            git diff HEAD~1...HEAD > pr.diff",
+    "          fi",
+    "          npx pr-review-orchestrator review --diff ./pr.diff --format github-pr > review.json",
+    "",
+    "      - name: Print review summary",
+    "        run: node -e \"const r=JSON.parse(require('fs').readFileSync('review.json','utf8')); console.log(r.reports?.markdown_summary ?? 'No summary generated');\"",
+    "",
+    "      - name: Post PR Review Comments",
+    "        if: github.event_name == 'pull_request'",
+    "        uses: actions/github-script@v7",
+    "        with:",
+    "          script: |",
+    "            const fs = require('fs');",
+    "            const review = JSON.parse(fs.readFileSync('review.json', 'utf8'));",
+    "            const comments = Array.isArray(review.comments) ? review.comments : [];",
+    "            const summary = review.summary || {};",
+    "            const summaryBody = [",
+    "              '## PR Review Orchestrator',",
+    "              '',",
+    "              'Decision: ' + (summary.final_decision || 'approve'),",
+    "              'Total issues: ' + (summary.total_issues || 0),",
+    "              'Critical: ' + (summary.critical_count || 0) + ' | High: ' + (summary.high_count || 0) + ' | Medium: ' + (summary.medium_count || 0) + ' | Low: ' + (summary.low_count || 0)",
+    "            ].join('\\n');",
+    "",
+    "            if (comments.length === 0) {",
+    "              await github.rest.issues.createComment({",
+    "                owner: context.repo.owner,",
+    "                repo: context.repo.repo,",
+    "                issue_number: context.payload.pull_request.number,",
+    "                body: review.reports?.markdown_summary || 'PR Review Orchestrator: no findings in this diff.'",
+    "              });",
+    "              return;",
+    "            }",
+    "",
+    "            try {",
+    "              await github.rest.pulls.createReview({",
+    "                owner: context.repo.owner,",
+    "                repo: context.repo.repo,",
+    "                pull_number: context.payload.pull_request.number,",
+    "                commit_id: context.payload.pull_request.head.sha,",
+    "                event: 'COMMENT',",
+    "                comments: comments.map((c) => ({",
+    "                  path: c.path,",
+    "                  line: c.line,",
+    "                  side: 'RIGHT',",
+    "                  body: c.body",
+    "                }))",
+    "              });",
+    "            } catch (error) {",
+    "              const compactComments = comments",
+    "                .slice(0, 20)",
+    "                .map((c) => '- ' + c.path + ':' + c.line + ' ' + c.body.split('\\n')[0])",
+    "                .join('\\n');",
+    "",
+    "              await github.rest.issues.createComment({",
+    "                owner: context.repo.owner,",
+    "                repo: context.repo.repo,",
+    "                issue_number: context.payload.pull_request.number,",
+    "                body: summaryBody + '\\n\\nInline review comments could not be attached automatically.\\n\\n' + (compactComments || 'Findings were generated but could not be rendered inline.')",
+    "              });",
+    "            }",
+    "",
+    "      - name: Upload review artifact",
+    "        uses: actions/upload-artifact@v4",
+    "        with:",
+    "          name: pr-review-json",
+    "          path: review.json",
+    ""
+  ].join("\n");
 }
 
 function buildGitlabCi(): string {

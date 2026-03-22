@@ -130,6 +130,7 @@ export interface FileFindingSummary {
 export interface ReviewFileResult {
   file: string;
   language: string;
+  changed_lines?: number[];
   triage: TriageResult;
   review: {
     issues: ReviewIssue[];

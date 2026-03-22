@@ -35,7 +35,31 @@ function fenceBlock(code: string, lang = "ts"): string {
   return `\`\`\`${lang}\n${trimmed}\n\`\`\``;
 }
 
-function toGithubComment(comment: PRComment): GithubPRReviewReport["comments"][number] {
+function resolveCommentLine(review: ReviewResult, comment: PRComment): number | null {
+  const file = review.files.find((entry) => entry.file === comment.file);
+  const changedLines = file?.changed_lines?.filter((line) => Number.isFinite(line)) ?? [];
+
+  if (changedLines.length === 0) return null;
+  if (changedLines.includes(comment.line)) return comment.line;
+
+  let nearest = changedLines[0];
+  let nearestDistance = Math.abs(comment.line - nearest);
+
+  for (const line of changedLines.slice(1)) {
+    const distance = Math.abs(comment.line - line);
+    if (distance < nearestDistance) {
+      nearest = line;
+      nearestDistance = distance;
+    }
+  }
+
+  return nearest;
+}
+
+function toGithubComment(review: ReviewResult, comment: PRComment): GithubPRReviewReport["comments"][number] | null {
+  const resolvedLine = resolveCommentLine(review, comment);
+  if (resolvedLine == null) return null;
+
   const badge = SEVERITY_BADGE[comment.severity] ?? comment.severity.toUpperCase();
   const agent = AGENT_LABEL[comment.agent] ?? comment.agent;
   const lines: string[] = [`[${badge}] ${comment.title}`, `Agent: ${agent}`, ""];
@@ -50,7 +74,7 @@ function toGithubComment(comment: PRComment): GithubPRReviewReport["comments"][n
 
   return {
     path: comment.file,
-    line: comment.line,
+    line: resolvedLine,
     severity: comment.severity,
     body: lines.join("\n")
   };
@@ -59,6 +83,8 @@ function toGithubComment(comment: PRComment): GithubPRReviewReport["comments"][n
 export function buildGithubPRReviewReport(review: ReviewResult): GithubPRReviewReport {
   return {
     summary: review.summary,
-    comments: review.reports.pr_comments.map((comment) => toGithubComment(comment))
+    comments: review.reports.pr_comments
+      .map((comment) => toGithubComment(review, comment))
+      .filter((comment): comment is GithubPRReviewReport["comments"][number] => comment !== null)
   };
 }

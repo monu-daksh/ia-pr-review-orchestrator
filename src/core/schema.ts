@@ -193,6 +193,7 @@ export function createEmptyReview(files: Array<{ file: string; language: string 
     files: files.map((file) => ({
       file: file.file,
       language: file.language,
+      changed_lines: [],
       triage: {
         needs_review: true,
         risk_level: "low",

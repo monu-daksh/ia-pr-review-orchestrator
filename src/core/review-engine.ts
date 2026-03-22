@@ -53,6 +53,7 @@ export async function reviewDiff(diffText: string, options: ReviewOptions = {}):
     ...(result.files[index] ?? createEmptyReview([file]).files[0]),
     file: file.file,
     language: file.language,
+    changed_lines: result.files[index]?.changed_lines ?? file.addedLines.map((line) => line.line),
     triage: result.files[index]?.triage ?? file.triage
   }));
 

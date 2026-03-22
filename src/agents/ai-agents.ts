@@ -348,6 +348,7 @@ async function reviewFileWithAI(file: TriagedFile): Promise<ReviewFileResult> {
   return {
     file: file.file,
     language: file.language,
+    changed_lines: file.addedLines.map((line) => line.line),
     triage: file.triage,
     review: { issues: reviewIssues },
     security: { vulnerabilities: securityIssues },
