@@ -49,6 +49,7 @@ function buildComment(issue: ReviewIssue | SecurityIssue): PRComment {
     id: issue.id,
     file: issue.file,
     line: issue.line,
+    agent: issue.agent,
     severity: issue.severity,
     category: issue.category,
     title: issue.title,

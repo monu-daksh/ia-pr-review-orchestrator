@@ -111,6 +111,8 @@ const JSON_INSTRUCTION = `
 Respond ONLY with valid JSON in this exact format - no markdown fences, no prose:
 {"issues":[{"line":<number>,"title":"<string>","message":"<string>","severity":"critical|high|medium|low","code_snippet":"<string>","suggestion":"<string>","fix":"<string>"}]}
 When possible, provide a concrete corrected code snippet in "fix". Do not return generic advice if you can show an exact code change.
+If an issue does not clearly belong to your assigned review scope, do not report it.
+Prefer zero findings over low-confidence or out-of-scope findings.
 If there are no issues, return: {"issues":[]}`.trim();
 
 const AGENT_SPECS: AgentSpec[] = [
@@ -130,6 +132,7 @@ Analyze ONLY for these security issues:
 - Insecure image or script sources
 - Token leakage in URLs
 Do NOT report style, performance, or general code quality issues.
+Reject anything outside security scope.
 ${JSON_INSTRUCTION}`
   },
   {
@@ -147,6 +150,7 @@ Analyze ONLY for runtime and correctness bugs:
 - Mutating data incorrectly
 - Incorrect calculations or transformations
 Do NOT report security or style issues.
+Reject anything outside bug scope.
 ${JSON_INSTRUCTION}`
   },
   {
@@ -164,6 +168,7 @@ Analyze ONLY for logic issues:
 - Invalid assumptions
 - Wrong business behavior
 Do NOT report security issues from this agent.
+Reject anything outside logic scope.
 ${JSON_INSTRUCTION}`
   },
   {
@@ -181,6 +186,7 @@ Analyze ONLY for:
 - Props/state/function params not typed
 - Inconsistent types
 Do NOT report security or performance issues from this agent.
+Reject anything outside type-safety scope.
 ${JSON_INSTRUCTION}`
   },
   {
@@ -199,6 +205,7 @@ Analyze ONLY for:
 - Loose equality
 - Formatting or naming issues
 Do NOT report security or performance issues from this agent.
+Reject anything outside lint/style scope.
 ${JSON_INSTRUCTION}`
   },
   {
@@ -217,6 +224,7 @@ Analyze ONLY for:
 - Large loops or blocking code
 - Duplicate expensive operations
 Do NOT report security issues from this agent.
+Reject anything outside performance scope.
 ${JSON_INSTRUCTION}`
   },
   {
@@ -235,6 +243,7 @@ Analyze ONLY for:
 - Poor component structure
 - No reusability
 Do NOT report direct security issues from this agent if the security agent would own them.
+Reject anything outside best-practices scope.
 ${JSON_INSTRUCTION}`
   },
   {
@@ -254,6 +263,7 @@ Analyze ONLY for:
 - Complex functions or large components
 - Poor readability or maintainability
 Do NOT report direct security issues from this agent if the security agent would own them.
+Reject anything outside maintainability/react-quality scope.
 ${JSON_INSTRUCTION}`
   }
 ];
@@ -356,6 +366,7 @@ function buildComment(issue: ReviewIssue | SecurityIssue): PRComment {
     id: issue.id,
     file: issue.file,
     line: issue.line,
+    agent: issue.agent,
     severity: issue.severity,
     category: issue.category,
     title: issue.title,

@@ -85,6 +85,7 @@ export interface PRComment {
   id: string;
   file: string;
   line: number;
+  agent: AgentName;
   severity: Severity;
   category: IssueCategory;
   title: string;

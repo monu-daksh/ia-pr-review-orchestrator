@@ -17,6 +17,18 @@ const SEVERITY_BADGE: Record<string, string> = {
   low: "LOW"
 };
 
+const AGENT_LABEL: Record<string, string> = {
+  security: "Security Agent",
+  bug: "Bug Agent",
+  logic: "Logic Agent",
+  types: "Type Agent",
+  eslint: "ESLint Agent",
+  performance: "Performance Agent",
+  "best-practices": "Best Practices Agent",
+  quality: "Quality Agent",
+  fix: "Fix Agent"
+};
+
 function fenceBlock(code: string, lang = "ts"): string {
   const trimmed = code?.trim();
   if (!trimmed) return "";
@@ -25,7 +37,8 @@ function fenceBlock(code: string, lang = "ts"): string {
 
 function toGithubComment(comment: PRComment): GithubPRReviewReport["comments"][number] {
   const badge = SEVERITY_BADGE[comment.severity] ?? comment.severity.toUpperCase();
-  const lines: string[] = [`[${badge}] ${comment.title}`, ""];
+  const agent = AGENT_LABEL[comment.agent] ?? comment.agent;
+  const lines: string[] = [`[${badge}] ${comment.title}`, `Agent: ${agent}`, ""];
 
   if (comment.issue) {
     lines.push(comment.issue, "");
