@@ -10,11 +10,33 @@ const DEFAULT_ENV_FILES = [
 ];
 
 const TOOL_DIR = "pr-review-orchestrator";
-const PROJECT_CONFIG_PATH = path.join(TOOL_DIR, "config.json");
-const LOCAL_CONFIG_PATH = path.join(TOOL_DIR, "local.json");
+const INIT_CONFIG_PATH = path.join(TOOL_DIR, "init.json");
+const LEGACY_LOCAL_CONFIG_PATH = path.join(TOOL_DIR, "local.json");
+const LEGACY_PROJECT_CONFIG_PATH = path.join(TOOL_DIR, "config.json");
 const LEGACY_CONFIG_FILE = "pr-review-orchestrator.config.json";
 
-interface ProjectConfig {
+interface InitConfig {
+  provider?: string;
+  selectedProvider?: string;
+  model?: string;
+  review?: {
+    includePaths?: string[];
+    failOnSeverity?: string[];
+  };
+  apiKeys?: {
+    groq?: string;
+    anthropic?: string;
+    gemini?: string;
+    openai?: string;
+    ollamaHost?: string;
+  };
+  repo?: {
+    detectedTypes?: string[];
+    requiredEnv?: string;
+  };
+}
+
+interface LegacyConfig {
   provider?: string;
   models?: {
     groq?: string;
@@ -22,19 +44,6 @@ interface ProjectConfig {
     gemini?: string;
     openai?: string;
     ollama?: string;
-  };
-}
-
-interface LocalConfig {
-  provider?: string;
-  selectedProvider?: string;
-  models?: ProjectConfig["models"];
-  apiKeys?: {
-    groq?: string;
-    anthropic?: string;
-    gemini?: string;
-    openai?: string;
-    ollamaHost?: string;
   };
 }
 
@@ -63,68 +72,6 @@ async function loadJsonFile<T>(filePath: string): Promise<T | null> {
   } catch {
     return null;
   }
-}
-
-function applyModelDefaults(models: ProjectConfig["models"] | undefined): void {
-  if (!models) return;
-
-  const modelMap: Record<string, string> = {
-    groq: "GROQ_MODEL",
-    anthropic: "ANTHROPIC_MODEL",
-    gemini: "GEMINI_MODEL",
-    openai: "OPENAI_MODEL",
-    ollama: "OLLAMA_MODEL"
-  };
-
-  for (const [provider, envKey] of Object.entries(modelMap)) {
-    const model = models[provider as keyof typeof models];
-    if (model && !(envKey in process.env)) {
-      process.env[envKey] = model;
-    }
-  }
-}
-
-async function loadProjectConfig(rootDir: string): Promise<void> {
-  const config =
-    await loadJsonFile<ProjectConfig>(path.join(rootDir, PROJECT_CONFIG_PATH)) ??
-    await loadJsonFile<ProjectConfig>(path.join(rootDir, LEGACY_CONFIG_FILE));
-
-  if (!config) return;
-
-  if (config.provider && !("PR_REVIEW_PROVIDER" in process.env)) {
-    process.env.PR_REVIEW_PROVIDER = config.provider;
-  }
-
-  applyModelDefaults(config.models);
-}
-
-async function loadLocalJsonConfig(rootDir: string): Promise<string[]> {
-  const filePath = path.join(rootDir, LOCAL_CONFIG_PATH);
-  const config = await loadJsonFile<LocalConfig>(filePath);
-  if (!config) return [];
-
-  if (config.provider && !("PR_REVIEW_PROVIDER" in process.env)) {
-    process.env.PR_REVIEW_PROVIDER = config.provider;
-  }
-
-  applyModelDefaults(config.models);
-
-  const apiKeys = config.apiKeys ?? {};
-  const keyMap: Record<string, string | undefined> = {
-    GROQ_API_KEY: apiKeys.groq,
-    ANTHROPIC_API_KEY: apiKeys.anthropic,
-    GEMINI_API_KEY: apiKeys.gemini,
-    OPENAI_API_KEY: apiKeys.openai,
-    OLLAMA_HOST: apiKeys.ollamaHost
-  };
-
-  for (const [envKey, value] of Object.entries(keyMap)) {
-    if (value && !(envKey in process.env)) {
-      process.env[envKey] = value;
-    }
-  }
-
-  return [filePath];
 }
 
 function stripWrappingQuotes(value: string): string {
@@ -159,6 +106,107 @@ function parseEnvFile(content: string): Record<string, string> {
   return values;
 }
 
+function applyModelToEnv(selectedProvider: string | undefined, model: string | undefined): void {
+  if (!selectedProvider || !model) return;
+
+  const envKeyMap: Record<string, string> = {
+    groq: "GROQ_MODEL",
+    anthropic: "ANTHROPIC_MODEL",
+    gemini: "GEMINI_MODEL",
+    openai: "OPENAI_MODEL",
+    ollama: "OLLAMA_MODEL"
+  };
+
+  const envKey = envKeyMap[selectedProvider];
+  if (envKey && !(envKey in process.env)) {
+    process.env[envKey] = model;
+  }
+}
+
+async function loadInitJsonConfig(rootDir: string): Promise<string[]> {
+  const filePath = path.join(rootDir, INIT_CONFIG_PATH);
+  const config = await loadJsonFile<InitConfig>(filePath);
+  if (!config) return [];
+
+  if (config.provider && !("PR_REVIEW_PROVIDER" in process.env)) {
+    process.env.PR_REVIEW_PROVIDER = config.provider;
+  }
+
+  applyModelToEnv(config.selectedProvider, config.model);
+
+  const apiKeys = config.apiKeys ?? {};
+  const keyMap: Record<string, string | undefined> = {
+    GROQ_API_KEY: apiKeys.groq,
+    ANTHROPIC_API_KEY: apiKeys.anthropic,
+    GEMINI_API_KEY: apiKeys.gemini,
+    OPENAI_API_KEY: apiKeys.openai,
+    OLLAMA_HOST: apiKeys.ollamaHost
+  };
+
+  for (const [envKey, value] of Object.entries(keyMap)) {
+    if (value && !(envKey in process.env)) {
+      process.env[envKey] = value;
+    }
+  }
+
+  return [filePath];
+}
+
+async function loadLegacyConfig(rootDir: string): Promise<void> {
+  const config =
+    await loadJsonFile<LegacyConfig>(path.join(rootDir, LEGACY_CONFIG_FILE)) ??
+    await loadJsonFile<LegacyConfig>(path.join(rootDir, LEGACY_PROJECT_CONFIG_PATH));
+
+  if (!config) return;
+
+  if (config.provider && !("PR_REVIEW_PROVIDER" in process.env)) {
+    process.env.PR_REVIEW_PROVIDER = config.provider;
+  }
+
+  const models = config.models ?? {};
+  const modelMap: Record<string, string> = {
+    groq: "GROQ_MODEL",
+    anthropic: "ANTHROPIC_MODEL",
+    gemini: "GEMINI_MODEL",
+    openai: "OPENAI_MODEL",
+    ollama: "OLLAMA_MODEL"
+  };
+
+  for (const [provider, envKey] of Object.entries(modelMap)) {
+    const model = models[provider as keyof typeof models];
+    if (model && !(envKey in process.env)) {
+      process.env[envKey] = model;
+    }
+  }
+}
+
+async function loadLegacyLocalConfig(rootDir: string): Promise<string[]> {
+  const filePath = path.join(rootDir, LEGACY_LOCAL_CONFIG_PATH);
+  const config = await loadJsonFile<InitConfig>(filePath);
+  if (!config) return [];
+
+  if (config.provider && !("PR_REVIEW_PROVIDER" in process.env)) {
+    process.env.PR_REVIEW_PROVIDER = config.provider;
+  }
+
+  const apiKeys = config.apiKeys ?? {};
+  const keyMap: Record<string, string | undefined> = {
+    GROQ_API_KEY: apiKeys.groq,
+    ANTHROPIC_API_KEY: apiKeys.anthropic,
+    GEMINI_API_KEY: apiKeys.gemini,
+    OPENAI_API_KEY: apiKeys.openai,
+    OLLAMA_HOST: apiKeys.ollamaHost
+  };
+
+  for (const [envKey, value] of Object.entries(keyMap)) {
+    if (value && !(envKey in process.env)) {
+      process.env[envKey] = value;
+    }
+  }
+
+  return [filePath];
+}
+
 export async function loadProjectEnv(rootDir = process.cwd()): Promise<string[]> {
   const loadedFiles: string[] = [];
 
@@ -182,8 +230,9 @@ export async function loadProjectEnv(rootDir = process.cwd()): Promise<string[]>
     }
   }
 
-  loadedFiles.push(...await loadLocalJsonConfig(rootDir));
-  await loadProjectConfig(rootDir);
+  loadedFiles.push(...await loadInitJsonConfig(rootDir));
+  loadedFiles.push(...await loadLegacyLocalConfig(rootDir));
+  await loadLegacyConfig(rootDir);
 
   return loadedFiles;
 }

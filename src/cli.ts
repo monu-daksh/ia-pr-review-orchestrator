@@ -8,8 +8,7 @@ import type { InstallProviderChoice, ReviewResult } from "./types.js";
 import { loadProjectEnv } from "./utils/env.js";
 
 const TOOL_DIR = "pr-review-orchestrator";
-const LOCAL_CONFIG_PATH = `${TOOL_DIR}/local.json`;
-const PROJECT_CONFIG_PATH = `${TOOL_DIR}/config.json`;
+const INIT_CONFIG_PATH = `${TOOL_DIR}/init.json`;
 
 function getArg(flag: string): string | undefined {
   const index = process.argv.indexOf(flag);
@@ -180,45 +179,40 @@ PR Review Orchestrator - Setup complete
 Files created in: ${result.rootDir}
 ${[writtenList, updatedList, skippedList].filter(Boolean).join("\n")}
 
-Detected repo type: ${result.detectedRepoTypes.join(", ")}
-Agents: security | bug | logic | types | eslint | performance | best-practices | quality
 Selected provider profile: ${selection.providerChoice}
 Selected model: ${selection.model}
 
 ---------------------------------------------------------
- SINGLE TOOL FOLDER
+ SIMPLE TOOL FOLDER
 ---------------------------------------------------------
- All tool files now live in:
-   ${TOOL_DIR}/
+ The tool creates only one config file for developers:
+   ${INIT_CONFIG_PATH}
 
- Developer secret and model file:
-   ${LOCAL_CONFIG_PATH}
-
- Developer project config file:
-   ${PROJECT_CONFIG_PATH}
+ Developers edit that file and put:
+   - API key
+   - model name
+   - provider choice
 
 ---------------------------------------------------------
  NEXT STEPS
 ---------------------------------------------------------
 
-1. Open ${LOCAL_CONFIG_PATH} and add your API key and model:
+1. Open ${INIT_CONFIG_PATH} and add your API key and model:
 
    Required setting: ${requiredKey}
    Selected model: ${selection.model}
 
-2. Add the same value as a GitHub repository secret for CI:
+2. Add the same key to GitHub repository secrets for CI:
    https://github.com/YOUR-USERNAME/${repoName}/settings/secrets/actions
    Name: ${requiredKey}
 
 3. Commit and push the non-secret files:
-   git add .github/workflows/pr-review-orchestrator.yml \\
-           ${PROJECT_CONFIG_PATH} \\
-           .gitignore
+   git add .github/workflows/pr-review-orchestrator.yml .gitignore
    git commit -m "add AI PR review"
    git push
 
-4. Open or update any PR. The workflow will review changed files
-   and post file-level findings in GitHub PR comments.
+4. Open or update any PR. The workflow will review changed files,
+   run all agents, and post findings in GitHub PR comments.
 `);
 }
 
@@ -236,4 +230,3 @@ async function main() {
 main().catch(() => {
   process.exitCode = 1;
 });
-

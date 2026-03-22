@@ -3,8 +3,7 @@ import path from "node:path";
 import type { InstallProviderChoice } from "../types.js";
 
 const TOOL_DIR = "pr-review-orchestrator";
-const PROJECT_CONFIG_NAME = "config.json";
-const LOCAL_CONFIG_NAME = "local.json";
+const INIT_FILE = "init.json";
 
 interface InitOptions {
   targetDir?: string;
@@ -94,34 +93,9 @@ function getRequiredEnv(providerChoice: InstallProviderChoice): string | null {
   }
 }
 
-function buildLocalConfig(providerChoice: InstallProviderChoice, model: string): string {
-  return JSON.stringify(
-    {
-      provider: providerChoice === "local" ? "local" : "multi-agent",
-      selectedProvider: providerChoice,
-      models: {
-        groq: providerChoice === "groq" ? model : getDefaultModel("groq"),
-        anthropic: providerChoice === "anthropic" ? model : getDefaultModel("anthropic"),
-        gemini: providerChoice === "gemini" ? model : getDefaultModel("gemini"),
-        openai: providerChoice === "openai" ? model : getDefaultModel("openai"),
-        ollama: providerChoice === "ollama" ? model : getDefaultModel("ollama")
-      },
-      apiKeys: {
-        groq: providerChoice === "groq" ? "your_groq_api_key_here" : "",
-        gemini: providerChoice === "gemini" ? "your_gemini_api_key_here" : "",
-        anthropic: providerChoice === "anthropic" ? "your_anthropic_api_key_here" : "",
-        openai: providerChoice === "openai" ? "your_openai_api_key_here" : "",
-        ollamaHost: providerChoice === "ollama" ? "http://localhost:11434" : ""
-      }
-    },
-    null,
-    2
-  ) + "\n";
-}
-
-function buildProjectConfig(repoTypes: string[], providerChoice: InstallProviderChoice, model: string): string {
-  const include = repoTypes.includes("react")
-    ? ["src", "app", "components", "pages", "server", "api"]
+function buildInitConfig(repoTypes: string[], providerChoice: InstallProviderChoice, model: string): string {
+  const includePaths = repoTypes.includes("react")
+    ? ["app", "src", "components", "pages", "server", "api"]
     : repoTypes.includes("python")
       ? ["src", "app", "services", "tests"]
       : repoTypes.includes("java")
@@ -131,23 +105,22 @@ function buildProjectConfig(repoTypes: string[], providerChoice: InstallProvider
   return JSON.stringify(
     {
       provider: providerChoice === "local" ? "local" : "multi-agent",
-      install: {
-        toolDirectory: TOOL_DIR,
-        localConfigFile: `${TOOL_DIR}/${LOCAL_CONFIG_NAME}`,
-        projectConfigFile: `${TOOL_DIR}/${PROJECT_CONFIG_NAME}`,
-        providerChoice,
-        selectedModel: model,
-        requiredEnv: getRequiredEnv(providerChoice)
-      },
+      selectedProvider: providerChoice,
+      model,
       review: {
-        includePaths: include,
-        maxContextLines: 12
-      },
-      ci: {
+        includePaths,
         failOnSeverity: []
       },
+      apiKeys: {
+        groq: providerChoice === "groq" ? "your_groq_api_key_here" : "",
+        gemini: providerChoice === "gemini" ? "your_gemini_api_key_here" : "",
+        anthropic: providerChoice === "anthropic" ? "your_anthropic_api_key_here" : "",
+        openai: providerChoice === "openai" ? "your_openai_api_key_here" : "",
+        ollamaHost: providerChoice === "ollama" ? "http://localhost:11434" : ""
+      },
       repo: {
-        detectedTypes: repoTypes
+        detectedTypes: repoTypes,
+        requiredEnv: getRequiredEnv(providerChoice)
       }
     },
     null,
@@ -161,6 +134,8 @@ function buildGithubWorkflow(): string {
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  push:
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:
@@ -186,25 +161,25 @@ jobs:
       - name: Run AI review
         env:
           GROQ_API_KEY: \${{ secrets.GROQ_API_KEY }}
-          GROQ_MODEL: \${{ secrets.GROQ_MODEL }}
           GEMINI_API_KEY: \${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: \${{ secrets.GEMINI_MODEL }}
-          OLLAMA_HOST: \${{ secrets.OLLAMA_HOST }}
-          OLLAMA_MODEL: \${{ secrets.OLLAMA_MODEL }}
           ANTHROPIC_API_KEY: \${{ secrets.ANTHROPIC_API_KEY }}
-          ANTHROPIC_MODEL: \${{ secrets.ANTHROPIC_MODEL }}
           OPENAI_API_KEY: \${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: \${{ secrets.OPENAI_MODEL }}
+          OLLAMA_HOST: \${{ secrets.OLLAMA_HOST }}
           GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: \${{ github.repository }}
         run: |
-          git diff origin/\${{ github.base_ref }}...HEAD > pr.diff
+          if [ "\${{ github.event_name }}" = "pull_request" ]; then
+            git diff origin/\${{ github.base_ref }}...HEAD > pr.diff
+          else
+            git diff HEAD~1...HEAD > pr.diff
+          fi
           npx pr-review-orchestrator review --diff ./pr.diff --format github-pr > review.json
 
       - name: Print review summary
         run: node -e "const r=JSON.parse(require('fs').readFileSync('review.json','utf8')); console.log(r.reports?.markdown_summary ?? 'No summary generated');"
 
       - name: Post PR Review Comments
+        if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
@@ -231,9 +206,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.payload.pull_request.number,
-                body: review.summary?.total_issues > 0
-                  ? review.reports?.markdown_summary || 'PR review completed.'
-                  : 'PR Review Orchestrator: no high-confidence findings in this diff.'
+                body: review.reports?.markdown_summary || 'PR Review Orchestrator: no findings in this diff.'
               });
             }
 
@@ -254,9 +227,16 @@ pr_review:
   stage: review
   only:
     - merge_requests
+    - main
+    - master
   script:
     - npm ci
-    - git diff origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME...HEAD > pr.diff
+    - |
+      if [ -n "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" ]; then
+        git diff origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME...HEAD > pr.diff
+      else
+        git diff HEAD~1...HEAD > pr.diff
+      fi
     - npx pr-review-orchestrator review --diff ./pr.diff --format github-pr > review.json
     - cat review.json
   artifacts:
@@ -303,8 +283,7 @@ async function updateGitIgnore(rootDir: string, result: InitResult): Promise<voi
     ".env",
     ".env.local",
     ".env.*.local",
-    `${TOOL_DIR}/${LOCAL_CONFIG_NAME}`,
-    ".pr-review-orchestrator",
+    `${TOOL_DIR}/${INIT_FILE}`,
     "pr.diff",
     "review.json"
   ];
@@ -340,17 +319,10 @@ export async function initProject(options: InitOptions = {}): Promise<InitResult
   const ci = options.ci || "github";
   const providerChoice = options.providerChoice ?? "groq";
   const model = options.model ?? getDefaultModel(providerChoice);
-  const toolDirPath = path.join(rootDir, TOOL_DIR);
 
   await writeFileIfMissing(
-    path.join(toolDirPath, LOCAL_CONFIG_NAME),
-    buildLocalConfig(providerChoice, model),
-    result
-  );
-
-  await writeFileIfMissing(
-    path.join(toolDirPath, PROJECT_CONFIG_NAME),
-    buildProjectConfig(repoTypes, providerChoice, model),
+    path.join(rootDir, TOOL_DIR, INIT_FILE),
+    buildInitConfig(repoTypes, providerChoice, model),
     result
   );
 
@@ -376,6 +348,3 @@ export async function initProject(options: InitOptions = {}): Promise<InitResult
 
   return result;
 }
-
-
-
