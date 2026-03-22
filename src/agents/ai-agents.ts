@@ -105,10 +105,10 @@ function buildCodeContext(file: TriagedFile): string {
     `Risk level: ${file.triage.risk_level}`,
     `Areas of concern: ${file.triage.areas_of_concern.join(", ") || "general"}`,
     "",
-    "Changed lines in this PR:",
+    "Lines changed in this PR (use for line number reference only — do NOT limit your review to these lines):",
     changedLines || "(no added lines)",
     "",
-    "Current full file content:",
+    "Current full file content (review this entirely for issues, including pre-existing ones):",
     fullFileLines || "(file content unavailable)"
   ].join("\n");
 }
@@ -117,6 +117,7 @@ const JSON_INSTRUCTION = `
 Respond ONLY with valid JSON in this exact format - no markdown fences, no prose:
 {"issues":[{"line":<number>,"title":"<string>","message":"<string>","severity":"critical|high|medium|low","code_snippet":"<string>","suggestion":"<string>","fix":"<string>"}]}
 When possible, provide a concrete corrected code snippet in "fix". Do not return generic advice if you can show an exact code change.
+IMPORTANT: Review the ENTIRE "Current full file content" for issues — not only the changed lines. Pre-existing issues anywhere in the file must be reported if the file was touched in this PR. Use the changed lines only to assign accurate line numbers to your findings.
 If an issue does not clearly belong to your assigned review scope, do not report it.
 Prefer zero findings over low-confidence or out-of-scope findings.
 If there are no issues, return: {"issues":[]}`.trim();
