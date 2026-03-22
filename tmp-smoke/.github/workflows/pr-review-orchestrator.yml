@@ -83,7 +83,7 @@ jobs:
                 issue_number: context.payload.pull_request.number,
                 body: review.summary?.total_issues > 0
                   ? review.reports?.markdown_summary || 'PR review completed.'
-                  : 'PR Review Orchestrator: no high-confidence findings in this diff.'
+                  : 'PR Review Orchestrator: no findings in this PR\'s touched files.'
               });
             }
 

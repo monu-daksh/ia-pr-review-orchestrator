@@ -88,7 +88,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.payload.pull_request.number,
-                body: 'PR Review Orchestrator: no high-confidence findings in this diff.'
+                body: 'PR Review Orchestrator: no findings in this PR\'s touched files.'
               });
             }
 
