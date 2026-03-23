@@ -2,38 +2,44 @@
  * ============================================================
  * FILE: src/agents/ai-agents.ts
  * PURPOSE: AI-powered multi-agent pipeline.
- *          Runs 9 specialized AI agents in parallel, each with a focused
+ *          Runs 8 specialized AI agents in parallel, each with a focused
  *          system prompt, to produce a comprehensive PR review.
  *
  * WHY MULTI-AGENT?
  *   A single "review everything" prompt produces weaker results because
  *   the model spreads attention across security, bugs, types, style, etc.
  *   Specialized agents with narrow, focused prompts find more issues:
- *     - Security agent only thinks about vulnerabilities — no distraction
+ *     - Security agent only thinks about vulnerabilities
  *     - Bug agent only thinks about runtime correctness
  *     - ESLint agent only checks lint rules
  *   Running them in parallel (Promise.all) adds no latency over a single call.
  *
- * AGENTS (9 specialized):
- *   security       — XSS, secrets, injection, open redirects (confidence: 0.88)
- *   bug            — null deref, unhandled async, race conditions (confidence: 0.85)
- *   logic          — loose equality, wrong conditions, state sync (confidence: 0.82)
- *   types          — any usage, missing types, unsafe assertions (confidence: 0.80)
- *   eslint         — console statements, unused vars, hook deps (confidence: 0.78)
- *   performance    — expensive renders, missing useMemo (confidence: 0.81)
- *   best-practices — hardcoded values, missing error handling (confidence: 0.77)
- *   quality        — component structure, side effects in render (confidence: 0.75)
- *   fix            — auto-generated patches (not a review agent, just counting)
+ * AGENTS (8 specialized — each maps exactly to the detection pipeline):
+ *   security       → secrets, tokens, XSS, unsafe HTML, injections
+ *   bug            → crashes, null issues, async issues, infinite loops
+ *   logic          → wrong conditions, loose equality, validation flaws
+ *   types          → any usage, missing types, unsafe typing
+ *   performance    → heavy loops, blocking UI, re-renders
+ *   eslint         → console logs, unused variables, bad patterns
+ *   best-practices → hardcoded values, poor structure
+ *   quality        → bad React patterns, side effects, large components
+ *
+ * IMPORTANT — NO KEYWORD FILTERING:
+ *   Each agent's findings are accepted as-is from the AI.
+ *   We trust each agent's focused system prompt to scope its output.
+ *   Deduplication and merging happens in schema.ts AFTER all agents run.
+ *   Previously a keyword filter (issueBelongsToAgent) was used here, but it
+ *   caused false negatives: e.g., a console.log finding mentioning a "secret"
+ *   would be dropped from the eslint agent because it matched security patterns.
+ *   Removed entirely — the AI's own system prompt is the scope boundary.
  *
  * FALLBACK:
  *   If ALL agents return zero findings across all files →
  *   runs local pattern agents (runLocalAgentPipeline) as a safety net.
- *   This ensures the review always returns something meaningful.
  *
  * AI BACKEND:
  *   Each agent calls callAI() from utils/ai-call.ts.
  *   callAI() auto-selects: Claude → Groq → Gemini → Ollama → null
- *   If null (no AI), agents return [] and the local fallback kicks in.
  * ============================================================
  */
 
@@ -59,21 +65,25 @@ import { safeJsonParse } from "../utils/json.js";
 /**
  * Shape of a single issue as returned by each AI agent.
  * AI agents return this simpler format — we normalize it into ReviewIssue/SecurityIssue
- * after filtering and validation.
+ * after all agents complete.
+ *
+ * `confidence` is optional — AI may or may not return it.
+ * Falls back to the agent spec's default confidence if missing.
  */
 interface AIReviewIssue {
   line: number;
   title: string;
   message: string;
   severity: Severity;
+  confidence?: number;   // AI-provided confidence score (0.0–1.0), optional
   code_snippet: string;
-  suggestion?: string;  // Plain-text advice (less specific than fix)
-  fix?: string;         // Concrete code fix
+  suggestion?: string;   // Advisory text (used when no concrete fix is available)
+  fix?: string;          // Concrete corrected code (preferred over suggestion)
 }
 
 /**
  * The JSON response expected from each AI agent.
- * The AI is instructed to return ONLY this JSON structure — no prose.
+ * AI is instructed to return ONLY this structure — no prose, no fences.
  */
 interface AIAgentResponse {
   issues: AIReviewIssue[];
@@ -84,111 +94,19 @@ interface AIAgentResponse {
 /**
  * Configuration for a single specialized agent.
  * Each agent has its own:
- *   - system prompt (persona and what to look for)
- *   - maxTokens (budget for its response)
- *   - confidence (score assigned to all findings from this agent)
- *   - category (how its findings are classified in the report)
+ *   - system   : focused persona + exact checklist of what to look for
+ *   - maxTokens: response budget (security needs more for detailed fixes)
+ *   - confidence: default score used if AI doesn't return one
+ *   - category : how its findings are classified (bug / security / performance / quality)
+ *   - label    : short tag added to each finding from this agent
  */
 interface AgentSpec {
-  agent: Exclude<AgentName, "fix">;              // Agent identifier (not "fix" — that's synthetic)
-  category: "security" | "bug" | "performance" | "quality"; // Finding category
-  system: string;                                // System prompt with persona + instructions
-  maxTokens: number;                             // Max response tokens for this agent
-  confidence: number;                            // Confidence score for all this agent's findings
-  label: string;                                 // Label added to each finding from this agent
-}
-
-// ─── Issue Routing Helpers ────────────────────────────────────────────────────
-
-/**
- * Normalizes text for pattern matching.
- * Lowercases and strips non-alphanumeric characters.
- */
-function normalizeText(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-}
-
-/**
- * Returns normalized text combining all relevant fields of an AI issue.
- * Used to match the issue against agent-specific keyword patterns.
- */
-function issueText(issue: AIReviewIssue): string {
-  return normalizeText(`${issue.title} ${issue.message} ${issue.code_snippet} ${issue.suggestion ?? ""} ${issue.fix ?? ""}`);
-}
-
-/**
- * Returns true if any of the patterns appear in the text.
- * Used to check if an issue's text contains keywords for a specific agent.
- */
-function hasAny(text: string, patterns: string[]): boolean {
-  return patterns.some((pattern) => text.includes(pattern));
-}
-
-/**
- * Checks whether an AI-generated issue belongs to a specific agent's scope.
- * This is needed because AI models sometimes report issues that don't fit
- * the agent's focus (e.g., security agent reporting a lint issue).
- *
- * Each agent has a list of topic keywords. Issues are routed to the agent
- * if their combined text contains any of those keywords AND doesn't match
- * a higher-priority agent (security always wins overlap).
- *
- * @param agent - The agent to check relevance for
- * @param issue - The AI-generated issue to check
- * @returns true if the issue belongs to this agent's scope
- */
-function issueBelongsToAgent(agent: Exclude<AgentName, "fix">, issue: AIReviewIssue): boolean {
-  const text = issueText(issue);
-
-  // ── Keyword lists per agent ───────────────────────────────────────────────
-  // Security-related keywords — security agent has priority over all others
-  const securityPatterns = [
-    "secret", "api key", "token", "password", "xss", "dangerouslysetinnerhtml", "redirect",
-    "javascript", "injection", "sanitize", "unsafe url", "script src", "img src", "console log secret"
-  ];
-  // Runtime bug keywords — actual crashes, data loss, incorrect behavior
-  const bugPatterns = [
-    "null", "undefined", "promise", "unhandled", "race condition", "memory leak", "infinite loop",
-    "freeze", "crash", "async misuse", "unreachable", "dead code"
-  ];
-  // Logic error keywords — wrong conditions, state inconsistency
-  const logicPatterns = [
-    "wrong condition", "loose equality", "==", "mutation", "incorrect calculation", "incorrect transformation",
-    "inconsistent", "invalid assumption", "edge case", "business logic"
-  ];
-  // Performance-related keywords
-  const performancePatterns = [
-    "performance", "expensive", "memo", "usememo", "usecallback", "re render", "rerender",
-    "math random", "date now", "blocking", "large loop", "heavy computation", "duplicate expensive"
-  ];
-  // Lint/style keywords
-  const eslintPatterns = [
-    "unused", "console", "inline function", "formatting", "naming", "hook dependency", "loose equality", "style"
-  ];
-  // TypeScript type safety keywords
-  const typePatterns = [
-    "any", "type", "interface", "props", "state", "optional chaining", "type assertion", "typed", "typescript"
-  ];
-  // Engineering best practice keywords
-  const bestPracticePatterns = [
-    "hardcoded", "separation of concerns", "error handling", "direct dom", "reusability", "component structure"
-  ];
-  // Code quality and React-specific keywords
-  const qualityPatterns = [
-    "key prop", "hydration", "side effect", "link usage", "loading state", "error state", "bundle size",
-    "extract component", "duplicate code", "readability", "maintainability", "large component", "nested condition"
-  ];
-
-  // Route issues to agents — security always gets priority (no other agent overrides it)
-  if (agent === "security") return hasAny(text, securityPatterns);
-  if (agent === "bug") return hasAny(text, bugPatterns) && !hasAny(text, securityPatterns);
-  if (agent === "logic") return hasAny(text, logicPatterns) && !hasAny(text, securityPatterns);
-  if (agent === "performance") return hasAny(text, performancePatterns) && !hasAny(text, securityPatterns);
-  if (agent === "eslint") return hasAny(text, eslintPatterns) && !hasAny(text, securityPatterns);
-  if (agent === "types") return hasAny(text, typePatterns) && !hasAny(text, securityPatterns);
-  if (agent === "best-practices") return hasAny(text, bestPracticePatterns) && !hasAny(text, securityPatterns);
-  if (agent === "quality") return hasAny(text, qualityPatterns) && !hasAny(text, securityPatterns);
-  return true; // Default: accept all (should not reach here with current agent list)
+  agent: Exclude<AgentName, "fix">;
+  category: "security" | "bug" | "performance" | "quality";
+  system: string;
+  maxTokens: number;
+  confidence: number;
+  label: string;
 }
 
 // ─── Code Context Builder ─────────────────────────────────────────────────────
@@ -198,226 +116,276 @@ function issueBelongsToAgent(agent: Exclude<AgentName, "fix">, issue: AIReviewIs
  * Includes:
  *   - File metadata (path, language, risk level, areas of concern)
  *   - Lines changed in this PR (for accurate line number references)
- *   - Full file content (for complete review, not just diff lines)
+ *   - Full file content (for complete review beyond just diff lines)
  *
  * Falls back to context lines from the diff if full file isn't available.
- *
- * @param file - The triaged file to build context for
- * @returns Formatted string with file metadata and code content
  */
 function buildCodeContext(file: TriagedFile): string {
-  // Format changed lines with line numbers: "42: const foo = 'bar';"
   const changedLines = file.addedLines.map((line) => `${line.line}: ${line.content}`).join("\n");
 
-  // Use full file content if available (preferred), fall back to diff context lines
   const fullFileLines = (file.fullFileLines?.length ? file.fullFileLines : file.contextLines)
     .map((line) => `${line.line}: ${line.content}`)
     .join("\n");
 
-  // Build a structured context block that agents can reason about
   return [
     `File: ${file.file}`,
     `Language: ${file.language}`,
     `Risk level: ${file.triage.risk_level}`,
     `Areas of concern: ${file.triage.areas_of_concern.join(", ") || "general"}`,
     "",
-    // Instruct the agent to use changed lines for line number references, not as the review scope
-    "Lines changed in this PR (use for line number reference only — do NOT limit your review to these lines):",
+    "Lines changed in this PR (use for line number reference only):",
     changedLines || "(no added lines)",
     "",
-    // The full file is where the agent should find and report issues
-    "Current full file content (review this entirely for issues, including pre-existing ones):",
+    "Current full file content (review this ENTIRELY — not just the diff):",
     fullFileLines || "(file content unavailable)"
   ].join("\n");
 }
 
-// ─── Response Format Instruction ─────────────────────────────────────────────
+// ─── Shared JSON Response Instruction ────────────────────────────────────────
 
 /**
- * Instruction appended to every agent's system prompt.
- * Tells the AI exactly what JSON format to return and how to handle edge cases.
+ * Appended to EVERY agent's system prompt.
+ * Tells the AI exactly what JSON format to return and the 6-step pipeline to follow.
  *
- * Key constraints:
- *   - No markdown fences (would break JSON parsing)
- *   - Include concrete fix code when possible
+ * Key rules:
+ *   - No markdown fences (breaks JSON parsing)
+ *   - Include `confidence` (0.0–1.0) per finding
  *   - Review the ENTIRE file, not just changed lines
- *   - Prefer zero findings over uncertain ones
- *   - Stay in scope (security agent should NOT report lint issues)
+ *   - Provide concrete `fix` code — not generic advice
+ *   - Stay strictly in scope — your system prompt defines your domain
  */
 const JSON_INSTRUCTION = `
-Respond ONLY with valid JSON in this exact format - no markdown fences, no prose:
-{"issues":[{"line":<number>,"title":"<string>","message":"<string>","severity":"critical|high|medium|low","confidence":<0.0-1.0>,"code_snippet":"<string>","suggestion":"<string>","fix":"<string>"}]}
+Respond ONLY with valid JSON. No markdown fences, no prose, no explanation outside JSON.
 
-Pipeline rules before outputting:
-STEP 1 — Detect all issues in your assigned scope across the ENTIRE file.
-STEP 2 — Merge any duplicate findings. Keep the most complete version.
-STEP 3 — Remove false positives. Only keep real, high-confidence issues. Assign severity: critical (crash/security), high (major bug/logic), medium (performance/maintainability), low (minor issues).
-STEP 4 — Consider full file context. Do NOT report out-of-scope issues.
-STEP 5 — If you found nothing, re-check once to ensure nothing was missed.
-STEP 6 — For each issue, provide concrete corrected code in "fix". Avoid generic advice.
+Exact format:
+{"issues":[{"line":<number>,"title":"<string>","message":"<string>","severity":"critical|high|medium|low","confidence":<0.0-1.0>,"code_snippet":"<string>","fix":"<string>"}]}
 
-When possible, provide a concrete corrected code snippet in "fix". Do not return generic advice if you can show an exact code change.
-IMPORTANT: Review the ENTIRE "Current full file content" for issues — not only the changed lines. Pre-existing issues anywhere in the file must be reported if the file was touched in this PR. Use the changed lines only to assign accurate line numbers to your findings.
-If an issue does not clearly belong to your assigned review scope, do not report it.
-Prefer zero findings over low-confidence or out-of-scope findings.
-If there are no issues, return: {"issues":[]}`.trim();
+Follow this pipeline before outputting:
+STEP 1 — DETECTION: Find ALL issues within your assigned scope across the ENTIRE file.
+STEP 2 — AGGREGATION: Merge duplicates. Keep the most complete version of each issue.
+STEP 3 — DECISION ENGINE: Remove false positives. Only real, high-confidence issues. Severity: critical=crash/security, high=major bug/logic, medium=performance/maintainability, low=minor.
+STEP 4 — CONTEXT: Consider full file context. Do NOT report issues outside your assigned scope.
+STEP 5 — SELF-CHECK: If output is weak or empty, re-check the file once to catch missed issues.
+STEP 6 — FIX: For every issue, provide CONCRETE corrected code in "fix". No generic advice.
+
+Rules:
+- Review the ENTIRE "Current full file content" — not only the changed lines.
+- Use changed lines ONLY to assign accurate line numbers to your findings.
+- ONLY report issues inside your specific assigned scope (defined by your persona above).
+- Prefer 0 findings over uncertain or out-of-scope findings.
+- Empty result: {"issues":[]}`.trim();
 
 // ─── Agent Specifications ─────────────────────────────────────────────────────
 
 /**
- * All 9 specialized agent configurations.
- * Each agent has a unique system prompt that defines its persona and
- * exactly what it MUST report. The "MUST report" list prevents agents
- * from skipping issues they'd normally mention but not flag as findings.
+ * All 8 specialized agent configurations.
  *
- * Order here determines processing order in reviewFileWithAI().
- * Security is always processed first (separate function: runAISecurityAgent).
+ * Each agent has:
+ *   1. A focused persona ("You are an expert X")
+ *   2. A "MUST report" checklist — prevents agents from skipping obvious issues
+ *   3. A "Do NOT report" boundary — keeps agents from straying into other domains
+ *   4. The shared JSON_INSTRUCTION for format and pipeline compliance
+ *
+ * These 8 agents map exactly to the detection pipeline specification:
+ *   security → bug → logic → types → performance → eslint → best-practices → quality
  */
 const AGENT_SPECS: AgentSpec[] = [
+  // ── 1. Security Agent ─────────────────────────────────────────────────────
   {
     agent: "security",
     category: "security",
-    confidence: 0.88,    // High confidence — security agent is strict and focused
+    confidence: 0.88,
     label: "security",
-    maxTokens: 1200,     // Larger budget — security issues need detailed fixes
-    system: `You are an expert application security engineer. Be thorough — missing a real vulnerability is worse than a false positive.
+    maxTokens: 1400,
+    system: `You are an expert application security engineer. Your ONLY job is to find security vulnerabilities.
+Scope: secrets/tokens, XSS vectors, unsafe HTML, SQL/command injection, open redirects, credential leaks.
+
 You MUST report every instance of:
-- Hardcoded secrets, passwords, tokens, API keys (e.g. const SECRET = "...", apiKey = "...")
+- Hardcoded secrets, API keys, passwords, tokens in source code
 - dangerouslySetInnerHTML with unsanitized or prop-sourced HTML
-- Sensitive data logged to console (passwords, tokens, emails)
-- Token or credential leakage in URLs (router.push("...?token="))
-- XSS vectors: javascript: URLs in href, inline event handlers that call alert/eval, unsanitized props rendered as HTML
-- Open redirects using user-controlled input
-- Password input fields using type="text" instead of type="password"
-- SQL/command injection via string interpolation
-- Insecure image or script sources using unsanitized props (e.g. src={props.img})
-Do NOT report style, performance, or general code quality issues.
+- Sensitive data logged to console (passwords, tokens, session IDs, user credentials)
+- Token or credential leakage in URLs (e.g. fetch(url + "?token=" + secret))
+- XSS: javascript: URLs in href/src, inline event handlers calling alert/eval
+- Unsanitized user input rendered as HTML or used in dangerous props
+- Open redirects driven by user-controlled data
+- Password fields typed as type="text" (exposes password in plain text)
+- SQL or command injection via string interpolation
+- iframes, images, or scripts sourcing from unsanitized user-controlled props
+- Cookies set with sensitive values in plain text (without HttpOnly/Secure flags)
+- contentEditable or innerHTML driven by unvalidated props
+
+Do NOT report performance, types, lint, or general code quality issues.
 ${JSON_INSTRUCTION}`
   },
+
+  // ── 2. Bug Agent ──────────────────────────────────────────────────────────
   {
     agent: "bug",
     category: "bug",
-    confidence: 0.85,    // High confidence — bug patterns are fairly unambiguous
+    confidence: 0.85,
     label: "bug",
-    maxTokens: 1100,
-    system: `You are a senior software engineer doing a strict bug review. Report every real runtime or correctness bug you find.
+    maxTokens: 1200,
+    system: `You are a senior software engineer. Your ONLY job is to find runtime bugs and crashes.
+Scope: crashes, null/undefined issues, async bugs, infinite loops, state mutation bugs.
+
 You MUST report every instance of:
-- Infinite loops or functions that permanently block the thread (while(true), for loops with no exit)
-- Missing return/guard after setting error state — execution that continues past a validation failure
+- Infinite loops or functions that permanently block the JS thread (while(true), unbounded for loops on user action)
+- Direct object mutation instead of creating new references (e.g. obj[key] = val then setState(obj) — React won't re-render)
+- Missing return/guard after setting error state — execution that falls through a validation failure
 - Unhandled promise rejections or missing await on async calls
-- Race conditions between async operations and state updates (e.g. setLoading after await with no cleanup)
-- Null/undefined dereference risks
-- Dead code: functions defined but never meaningfully called, results computed and discarded
-- setLoading(false) or similar cleanup missing from error paths
-Do NOT report security or style issues.
+- Race conditions: state updates after async calls with no cleanup (e.g. setLoading after unmounted component)
+- Null or undefined dereference that will throw at runtime
+- Missing cleanup in useEffect (timers, subscriptions, event listeners not removed)
+- setBusy(false) or equivalent cleanup missing from catch/error paths
+- Functions or values computed but their result never used (dead computation)
+
+Do NOT report security vulnerabilities, style, or type issues.
 ${JSON_INSTRUCTION}`
   },
+
+  // ── 3. Logic Agent ────────────────────────────────────────────────────────
   {
     agent: "logic",
     category: "bug",
-    confidence: 0.82,    // Slightly lower — logic errors require more context to confirm
+    confidence: 0.82,
     label: "logic",
-    maxTokens: 1100,
-    system: `You are a senior software engineer doing a strict logic review. Report every logic flaw you find — do not skip obvious ones.
+    maxTokens: 1200,
+    system: `You are a senior software engineer. Your ONLY job is to find logic flaws and incorrect behavior.
+Scope: wrong conditions, loose equality, assignment-in-condition, validation flaws, incorrect state transitions.
+
 You MUST report every instance of:
-- Loose equality (== or !=) where strict equality (=== or !==) is needed
-- Validation that runs setError but does not return — execution falls through incorrectly
-- Conditions that are always true or always false
-- Hardcoded credentials used in comparison logic (e.g. email === "user@example.com")
-- Business logic that bypasses proper authentication or authorization
-- Wrong operator precedence or incorrect boolean logic
-- UI state that can get out of sync (e.g. setLoading(true) without guaranteed setLoading(false))
-Do NOT report security issues that belong to the security agent.
+- Assignment operator used where comparison was intended (if(x = y) instead of if(x === y))
+- Loose equality (== or !=) where strict equality (=== or !==) should be used
+- Conditions that are always true or always false due to wrong logic
+- Validation that sets an error but does NOT return — execution falls through incorrectly
+- Hardcoded credentials or magic values used in comparison logic (e.g. username === "admin")
+- Business logic that bypasses authentication (e.g. hardcoded admin check)
+- Wrong boolean operator (|| vs &&) that changes the intended logic
+- UI state that can get permanently out of sync (loading=true with no guaranteed reset to false)
+- Incorrect operator precedence that changes evaluation order
+
+Do NOT report security vulnerabilities. Focus on logic correctness only.
 ${JSON_INSTRUCTION}`
   },
+
+  // ── 4. Types Agent ────────────────────────────────────────────────────────
   {
     agent: "types",
     category: "quality",
     confidence: 0.80,
     label: "types",
-    maxTokens: 1000,
-    system: `You are a TypeScript expert doing a strict type-safety review. Report every type weakness you find.
+    maxTokens: 1100,
+    system: `You are a TypeScript expert. Your ONLY job is to find type safety violations.
+Scope: any usage, missing types, unsafe typing, props typed as any, missing interfaces.
+
 You MUST report every instance of:
-- useState<any> — state variables typed as any instead of a concrete type
-- Function parameters or event handlers typed as any (e.g. (e: any) => ...)
-- Component props typed as any instead of a proper interface
-- Missing return types on functions with non-trivial logic
-- Type assertions (as X) that hide real type mismatches
-- Unsafe optional chaining used to silence errors instead of handling them
-- Inconsistent types between what is stored and what is used
-Do NOT report security or performance issues.
+- Component props typed as "any" — must have a proper interface or type
+- useState<any> or useReducer<any> — state typed as any instead of concrete type
+- Event handler parameters typed as any (e.g. (e: any) => ..., onChange={(e:any)=>...})
+- Function parameters typed as any when a specific type is available
+- Missing return types on exported functions with non-trivial logic
+- Type assertions (as SomeType) that hide real type errors
+- Implicit any from untyped destructuring or function parameters
+- Inconsistent types between stored value and actual usage
+
+Do NOT report security, performance, or logic issues. Focus on TypeScript type safety only.
 ${JSON_INSTRUCTION}`
   },
-  {
-    agent: "eslint",
-    category: "quality",
-    confidence: 0.78,
-    label: "eslint",
-    maxTokens: 900,      // Smaller budget — lint issues are usually simple
-    system: `You are a linting expert doing a strict static code review. Report every lint violation you find.
-You MUST report every instance of:
-- console.log, console.error, or console.warn left in production code paths
-- Variables or functions declared but never used
-- Inline arrow functions passed to onClick or similar JSX props that do nothing useful (e.g. onClick={()=>Math.random()})
-- Loose equality (== or !=) instead of strict equality
-- Missing React hook dependency array entries
-- Unused imports
-- Event handlers with no meaningful side effect
-Do NOT report security or performance issues.
-${JSON_INSTRUCTION}`
-  },
+
+  // ── 5. Performance Agent ──────────────────────────────────────────────────
   {
     agent: "performance",
     category: "performance",
     confidence: 0.81,
     label: "performance",
-    maxTokens: 950,
-    system: `You are a performance engineering expert doing a strict performance review. Report every performance problem you find.
+    maxTokens: 1100,
+    system: `You are a performance engineering expert. Your ONLY job is to find performance problems.
+Scope: heavy loops, blocking UI, unnecessary re-renders, expensive operations in hot paths.
+
 You MUST report every instance of:
-- Heavy synchronous computation inside event handlers or render (e.g. loops with millions of iterations)
-- Blocking the UI thread with synchronous busy-wait loops (while(true), large for loops on click)
-- Math.random() or Date.now() called on every render or inside JSX
-- Functions defined inside render or JSX that are recreated on every render
-- Missing useMemo or useCallback for expensive values or callbacks passed as props
-- Duplicate expensive operations that could be cached
-- Artificial delays (setTimeout) that block useful work without a clear reason
-Do NOT report security issues.
+- Heavy synchronous computation (large loops, 100k+ iterations) executed inside React render body or JSX
+- Heavy computation called directly in JSX like {heavy()} — runs on every render
+- Blocking the UI thread with synchronous busy-wait loops (while(true), for loops on button click)
+- Math.random() or Date.now() called on every render (in JSX, className, or component body outside useMemo)
+- Using Math.random() as a React list key — causes full list re-mount on every render
+- Inline functions in JSX props recreated on every render (onClick={()=>...}) that should be useCallback
+- Missing useMemo for expensive derived values passed down as props
+- Missing useCallback for stable function references passed as props to child components
+- useEffect with missing dependency array — runs on every single render
+
+Do NOT report security or logic issues. Focus on render performance and blocking operations only.
 ${JSON_INSTRUCTION}`
   },
+
+  // ── 6. ESLint Agent ───────────────────────────────────────────────────────
+  {
+    agent: "eslint",
+    category: "quality",
+    confidence: 0.78,
+    label: "eslint",
+    maxTokens: 1000,
+    system: `You are a static analysis and linting expert. Your ONLY job is to find lint violations and bad code patterns.
+Scope: console logs, unused code, bad patterns, hook violations, useless event handlers.
+
+You MUST report every instance of:
+- console.log, console.error, console.warn, console.debug left in production code
+- Variables declared but never read or used (const/let/var that are unused)
+- Imports that are never used in the file
+- onClick or other event handlers that do nothing useful (e.g. onClick={()=>Math.random()}, onClick={()=>{}})
+- Loose equality operators (== or !=) — should use === or !==
+- React useEffect with a missing or incomplete dependency array
+- var keyword usage instead of const or let
+- Unreachable code after return statements
+
+Do NOT report security vulnerabilities or performance issues. Focus on static analysis patterns only.
+${JSON_INSTRUCTION}`
+  },
+
+  // ── 7. Best Practices Agent ───────────────────────────────────────────────
   {
     agent: "best-practices",
     category: "quality",
     confidence: 0.77,
     label: "best-practices",
-    maxTokens: 950,
-    system: `You are a senior engineer doing a strict best-practices review. Report every engineering practice violation you find.
+    maxTokens: 1050,
+    system: `You are a senior software architect. Your ONLY job is to find engineering best practice violations.
+Scope: hardcoded values, poor structure, missing error handling, bad component design.
+
 You MUST report every instance of:
-- Hardcoded values that should be environment variables or constants (credentials, URLs, magic strings)
-- Authentication or business logic embedded directly inside UI components
-- Functions exposed in the UI that serve no purpose or are dangerous (e.g. a button that freezes the app)
-- Missing error handling around operations that can fail
-- Component responsibilities mixed together (data fetching + validation + rendering in one place)
-- Props used without validation or default values in critical paths
-- No separation between UI state and business rules
-Do NOT report security issues that belong to the security agent.
+- Hardcoded URLs, credentials, or configuration values that should be environment variables
+- Authentication or authorization logic embedded directly inside UI render components
+- UI buttons or actions that expose dangerous operations (e.g. a button labeled "crash" that calls freeze())
+- Missing error handling around fetch calls, async operations, or operations that can fail
+- Component doing too many jobs: data fetching + validation + business logic + rendering all mixed together
+- Props consumed without null checking in critical paths (renders may crash on undefined)
+- No separation between UI state (loading, error) and business rules (validation, auth)
+- Magic numbers or magic strings inline in JSX instead of named constants
+
+Do NOT report security vulnerabilities. Focus on engineering structure and practices.
 ${JSON_INSTRUCTION}`
   },
+
+  // ── 8. Quality Agent ──────────────────────────────────────────────────────
   {
     agent: "quality",
     category: "quality",
-    confidence: 0.75,    // Lowest confidence — quality issues are often subjective
+    confidence: 0.75,
     label: "quality",
-    maxTokens: 900,
-    system: `You are a software architect doing a strict React/Next.js quality review. Report every quality issue you find.
+    maxTokens: 1000,
+    system: `You are a React/Next.js software architect. Your ONLY job is to find code quality and React pattern violations.
+Scope: bad React patterns, side effects in render body, missing states, large components, XSS-adjacent rendering.
+
 You MUST report every instance of:
-- Link or anchor elements with href set to javascript: URLs or other non-navigation values
-- dangerouslySetInnerHTML used without a clear sanitization comment or wrapper
-- img or media elements with onError handlers that call alert or expose internal state
-- Side effects (API calls, mutations) inside the render body instead of useEffect
-- Missing loading or error states for async operations shown in UI
-- Components too large to maintain — doing more than one job
-- Duplicate logic that should be extracted to a hook or utility
-Do NOT report security issues that belong to the security agent.
+- Side effects (API calls, localStorage writes, mutations) directly in the component render body instead of useEffect
+- useEffect without a dependency array — causes infinite re-render loop
+- Missing loading state: async operations that show no visual feedback while in progress
+- Missing error state: async operations that fail silently with no user-visible error message
+- Component that is too large and handles too many concerns (should be split into smaller components)
+- Duplicate logic repeated in multiple places that should be extracted to a custom hook or utility
+- Unstable list keys (using Math.random() or array index as React key)
+- Date.now() or random values rendered directly in JSX — causes hydration mismatches in Next.js
+
+Do NOT report security vulnerabilities. Focus on React patterns and component quality.
 ${JSON_INSTRUCTION}`
   }
 ];
@@ -425,54 +393,46 @@ ${JSON_INSTRUCTION}`
 // ─── Agent Runner Functions ───────────────────────────────────────────────────
 
 /**
- * Runs a single AI security agent on a file.
- * Calls the AI with the security-focused system prompt and parses the response.
- * Filters returned issues through issueBelongsToAgent() to keep only security issues.
+ * Runs the security agent on a file.
+ * Returns SecurityIssue[] (different shape from ReviewIssue — always category="security").
  *
- * Returns SecurityIssue[] (not ReviewIssue[]) because security findings have
- * a different shape (fix vs. suggestion, always category="security").
- *
- * @param file - The triaged file to review
- * @param spec - The security agent specification
- * @returns Array of SecurityIssue objects, or [] if AI fails or returns nothing
+ * NOTE: No keyword filtering is applied here. The agent's system prompt defines
+ * its scope. All issues returned by the AI are accepted and tagged with agent="security".
+ * Deduplication in schema.ts handles any overlap with other agents.
  */
 async function runAISecurityAgent(file: TriagedFile, spec: AgentSpec): Promise<SecurityIssue[]> {
-  // Call the AI with the agent's system prompt and the file's code context
   const text = await callAI(spec.system, buildCodeContext(file), spec.maxTokens);
-  if (!text) return []; // No AI available or call failed
+  if (!text) return [];
 
-  // Parse the AI's JSON response
   const parsed = safeJsonParse<AIAgentResponse | null>(text, null);
-  if (!parsed?.issues?.length) return []; // No issues found or bad response format
+  if (!parsed?.issues?.length) return [];
 
-  // Filter to only security-related issues and normalize into SecurityIssue objects
-  return parsed.issues
-    .filter((issue) => issueBelongsToAgent(spec.agent, issue)) // Keep only security-scope issues
-    .map((issue) => ({
-      id: `S-ai-${file.file}-${issue.line}-${spec.agent}`, // Unique ID: S-ai-{file}-{line}-{agent}
-      category: "security",          // Always "security" for security agent findings
-      severity: issue.severity,
-      agent: "security",             // Always attributed to the security agent
-      file: file.file,
-      line: issue.line,
-      code_snippet: issue.code_snippet,
-      title: issue.title,
-      message: issue.message,
-      fix: issue.fix ?? issue.suggestion ?? "",             // Prefer fix over suggestion
-      corrected_code: issue.fix ?? issue.suggestion,
-      labels: [spec.label, issue.severity],                 // e.g., ["security", "critical"]
-      confidence: spec.confidence                           // Agent-level confidence score (0.88)
-    }));
+  return parsed.issues.map((issue) => ({
+    id: `S-ai-${file.file}-${issue.line}-security`,
+    category: "security" as const,
+    severity: issue.severity,
+    agent: "security" as const,
+    file: file.file,
+    line: issue.line,
+    code_snippet: issue.code_snippet ?? "",
+    title: issue.title,
+    message: issue.message,
+    fix: issue.fix ?? issue.suggestion ?? "",
+    corrected_code: issue.fix ?? issue.suggestion,
+    labels: [spec.label, issue.severity],
+    // Use AI-provided confidence if present, fall back to agent spec default
+    confidence: typeof issue.confidence === "number" ? issue.confidence : spec.confidence
+  }));
 }
 
 /**
- * Runs a single AI review agent (non-security) on a file.
- * Same structure as runAISecurityAgent but returns ReviewIssue[] instead.
- * The category is taken from the agent spec (bug, performance, quality).
+ * Runs a single non-security review agent on a file.
+ * Returns ReviewIssue[] tagged with the agent that produced them.
  *
- * @param file - The triaged file to review
- * @param spec - The agent specification (bug, logic, types, eslint, performance, etc.)
- * @returns Array of ReviewIssue objects, or [] if AI fails or returns nothing
+ * NOTE: No keyword filtering is applied. The agent's system prompt scopes it.
+ * The `agent` field on each finding is always set to `spec.agent` — the calling agent.
+ * This ensures the output correctly attributes findings even if the AI's description
+ * happens to mention terms from another domain (e.g. a bug description mentioning "token").
  */
 async function runAIReviewAgent(file: TriagedFile, spec: AgentSpec): Promise<ReviewIssue[]> {
   const text = await callAI(spec.system, buildCodeContext(file), spec.maxTokens);
@@ -481,72 +441,68 @@ async function runAIReviewAgent(file: TriagedFile, spec: AgentSpec): Promise<Rev
   const parsed = safeJsonParse<AIAgentResponse | null>(text, null);
   if (!parsed?.issues?.length) return [];
 
-  return parsed.issues
-    .filter((issue) => issueBelongsToAgent(spec.agent, issue)) // Keep only in-scope issues
-    .map((issue) => ({
-      id: `R-ai-${spec.agent}-${file.file}-${issue.line}`, // Unique ID: R-ai-{agent}-{file}-{line}
-      category: spec.category,      // bug, performance, or quality
-      severity: issue.severity,
-      agent: spec.agent,            // Which agent found this
-      file: file.file,
-      line: issue.line,
-      code_snippet: issue.code_snippet,
-      title: issue.title,
-      message: issue.message,
-      suggestion: issue.suggestion ?? issue.fix ?? "",  // Advisory text
-      corrected_code: issue.fix,                        // Concrete code fix
-      labels: [spec.label, issue.severity],             // e.g., ["bug", "medium"]
-      confidence: spec.confidence                       // Agent-level confidence score
-    }));
+  return parsed.issues.map((issue) => ({
+    id: `R-ai-${spec.agent}-${file.file}-${issue.line}`,
+    category: spec.category,
+    severity: issue.severity,
+    agent: spec.agent,
+    file: file.file,
+    line: issue.line,
+    code_snippet: issue.code_snippet ?? "",
+    title: issue.title,
+    message: issue.message,
+    suggestion: issue.suggestion ?? issue.fix ?? "",
+    corrected_code: issue.fix,
+    labels: [spec.label, issue.severity],
+    // Use AI-provided confidence if present, fall back to agent spec default
+    confidence: typeof issue.confidence === "number" ? issue.confidence : spec.confidence
+  }));
 }
 
 // ─── Per-File Review ──────────────────────────────────────────────────────────
 
 /**
- * Runs all 9 agents on a single file using Promise.all for parallel execution.
- * The security agent runs separately (different return type) and the rest run together.
- * Collects findings and auto-generated patches into a ReviewFileResult.
+ * Runs all 8 specialized agents on a single file using Promise.all for full parallelism.
+ * Security runs separately (different return type: SecurityIssue vs ReviewIssue).
+ * All 9 calls are made simultaneously — no serial bottleneck.
  *
- * @param file - The triaged file to review
- * @returns Complete ReviewFileResult with findings from all 9 agents
+ * Findings from all agents are collected without any filtering.
+ * Deduplication happens in schema.ts (finalizeSummary → dedupeReviewResult).
  */
 async function reviewFileWithAI(file: TriagedFile): Promise<ReviewFileResult> {
-  // Separate security from other agents (different return type: SecurityIssue vs ReviewIssue)
   const securitySpec = AGENT_SPECS.find((spec) => spec.agent === "security")!;
-  const reviewSpecs = AGENT_SPECS.filter((spec) => spec.agent !== "security");
+  const reviewSpecs  = AGENT_SPECS.filter((spec) => spec.agent !== "security");
 
-  // Run all agents in parallel — security + all review agents simultaneously
-  // This means 9 concurrent AI calls, one per agent
+  // All 9 agent calls in parallel — security returns SecurityIssue[], others return ReviewIssue[]
   const [securityIssues, ...reviewIssueSets] = await Promise.all([
-    runAISecurityAgent(file, securitySpec),                   // Security agent (returns SecurityIssue[])
-    ...reviewSpecs.map((spec) => runAIReviewAgent(file, spec)) // 8 review agents (return ReviewIssue[])
+    runAISecurityAgent(file, securitySpec),
+    ...reviewSpecs.map((spec) => runAIReviewAgent(file, spec))
   ]);
 
-  // Flatten the per-agent review issue arrays into a single list
   const reviewIssues = reviewIssueSets.flat();
 
-  // Build patches from any finding that has a corrected_code
+  // Collect patches from any finding that has a concrete fix
   const patches: Patch[] = [...securityIssues, ...reviewIssues]
-    .filter((issue) => issue.corrected_code)  // Only issues with a concrete fix
+    .filter((issue) => issue.corrected_code)
     .map((issue) => ({
       file: file.file,
       line: issue.line,
       original: issue.code_snippet,
-      fixed: issue.corrected_code as string   // Safe because we filtered above
+      fixed: issue.corrected_code as string
     }));
 
   return {
     file: file.file,
     language: file.language,
-    changed_lines: file.addedLines.map((line) => line.line), // Line numbers from the diff
+    changed_lines: file.addedLines.map((line) => line.line),
     triage: file.triage,
     review: { issues: reviewIssues },
     security: { vulnerabilities: securityIssues },
     fix: {
       required: patches.length > 0,
-      fixed_code: patches.map((patch) => patch.fixed).join("\n"), // All fix suggestions joined
+      fixed_code: patches.map((patch) => patch.fixed).join("\n"),
       patches,
-      changes_summary: patches.map((patch) => `Line ${patch.line}: ${patch.fixed.slice(0, 80)}`) // First 80 chars
+      changes_summary: patches.map((patch) => `Line ${patch.line}: ${patch.fixed.slice(0, 80)}`)
     }
   };
 }
@@ -555,19 +511,14 @@ async function reviewFileWithAI(file: TriagedFile): Promise<ReviewFileResult> {
 
 /**
  * Converts a ReviewIssue or SecurityIssue into a formatted PRComment.
- * The comment body is formatted as markdown for GitHub PR display.
- *
- * @param issue - The finding to convert
- * @returns A PRComment with a markdown-formatted body
  */
 function buildComment(issue: ReviewIssue | SecurityIssue): PRComment {
-  // Get the best available fix code from whichever field is populated
   const correctedCode =
     "corrected_code" in issue && issue.corrected_code
       ? issue.corrected_code
       : "fix" in issue
-        ? issue.fix       // SecurityIssue uses `fix`
-        : issue.suggestion; // ReviewIssue uses `suggestion`
+        ? issue.fix
+        : issue.suggestion;
 
   return {
     id: issue.id,
@@ -579,36 +530,33 @@ function buildComment(issue: ReviewIssue | SecurityIssue): PRComment {
     title: issue.title,
     issue: issue.message,
     code_snippet: issue.code_snippet,
-    corrected_code: correctedCode,
+    corrected_code: correctedCode ?? "",
     labels: issue.labels,
-    // Markdown body for GitHub PR comment display
     body: [
       `**${issue.title}**`,
-      `File: \`${issue.file}\` - Line: ${issue.line}`,
-      `Severity: \`${issue.severity}\``,
+      `File: \`${issue.file}\` — Line: ${issue.line} | Agent: \`${issue.agent}\` | Severity: \`${issue.severity}\``,
       "",
       issue.message,
       "",
-      correctedCode ? `**Suggested fix:**\n\`\`\`\n${correctedCode}\n\`\`\`` : ""
+      correctedCode?.trim() ? `**Suggested fix:**\n\`\`\`\n${correctedCode}\n\`\`\`` : ""
     ].filter(Boolean).join("\n")
   };
 }
 
 /**
- * Builds the agent_runs summary showing finding counts per agent.
- * "fix" agent count = total number of auto-generated patches (not a review agent).
- *
- * @param files - All reviewed file results
- * @returns Array of AgentRunSummary, one per agent name
+ * Builds the agent_runs summary: how many findings each agent produced.
+ * The "fix" agent count = total number of auto-generated patches across all agents.
  */
 function buildAgentRuns(files: ReviewFileResult[]): AgentRunSummary[] {
-  const allIssues = files.flatMap((file) => [...file.review.issues, ...file.security.vulnerabilities]);
-  const patchCount = files.reduce((count, file) => count + file.fix.patches.length, 0);
+  const allIssues   = files.flatMap((file) => [...file.review.issues, ...file.security.vulnerabilities]);
+  const patchCount  = files.reduce((n, file) => n + file.fix.patches.length, 0);
 
   return (["security", "bug", "logic", "types", "eslint", "performance", "best-practices", "quality", "fix"] as const).map((agent) => ({
     agent,
-    findings: agent === "fix" ? patchCount : allIssues.filter((issue) => issue.agent === agent).length,
-    status: "completed" as const // Always "completed" — failed agents return [] not errors
+    findings: agent === "fix"
+      ? patchCount
+      : allIssues.filter((issue) => issue.agent === agent).length,
+    status: "completed" as const
   }));
 }
 
@@ -618,50 +566,40 @@ function buildAgentRuns(files: ReviewFileResult[]): AgentRunSummary[] {
  * Runs the AI multi-agent pipeline on all triaged files.
  * Called by MultiAgentProvider.review().
  *
- * FLOW:
- *   1. For each file, run all 9 specialized AI agents in parallel
- *   2. Collect all findings and patches
+ * PIPELINE:
+ *   1. For each file, run all 8 specialized agents in parallel
+ *   2. Collect ALL findings — no keyword filtering at this stage
  *   3. If ALL agents found nothing across ALL files → run local pattern fallback
- *   4. Finalize: deduplicate, count, decide approve/request_changes
+ *   4. finalizeSummary: deduplicate cross-agent overlaps, count severities, decide approve/request_changes
  *
- * FALLBACK CONDITION:
- *   Zero findings from all AI agents means either:
- *     a) No AI is configured → callAI returns null → agents return []
- *     b) AI returned no issues (possible on simple/clean diffs)
- *     c) AI response was unparseable
- *   In all these cases, local pattern agents provide a safety net.
- *
- * @param triagedFiles - Files with diff content and risk triage
- * @returns ReviewResult from AI agents (or local pattern fallback)
+ * DEDUPLICATION happens in finalizeSummary (schema.ts), not here.
+ * This ensures a bug agent finding and a security agent finding for the same line
+ * are merged correctly rather than one being silently dropped by a filter.
  */
 export async function runAIAgentPipeline(triagedFiles: TriagedFile[]): Promise<ReviewResult> {
-  const result = createEmptyReview(triagedFiles); // Start with clean empty structure
+  const result = createEmptyReview(triagedFiles);
 
-  // Run all agents on all files — files are processed in parallel too
+  // Run all agents on all files in parallel
   const fileResults = await Promise.all(triagedFiles.map((file) => reviewFileWithAI(file)));
 
-  // Check if any agent found anything at all across all files
+  // Check if any agent produced any findings at all
   const hasAnyFindings = fileResults.some((file) =>
     file.review.issues.length > 0 || file.security.vulnerabilities.length > 0
   );
 
-  // If no findings at all, fall back to local pattern agents.
-  // This handles both "no AI configured" and "AI returned nothing" cases.
+  // Fallback: no AI configured, all calls failed, or AI returned nothing for all files
   if (!hasAnyFindings) {
     return runLocalAgentPipeline(triagedFiles);
   }
 
-  // Populate the result with AI agent findings
   result.files = fileResults;
 
-  // Build PR comments from all findings across all files
   result.reports.pr_comments = fileResults.flatMap((file) =>
     [...file.review.issues, ...file.security.vulnerabilities].map(buildComment)
   );
 
-  // Build agent run summary (finding counts per agent)
   result.reports.agent_runs = buildAgentRuns(fileResults);
 
-  // Deduplicate, count severities, decide approve/request_changes, build markdown summary
+  // Deduplicate, count, decide, build markdown summary
   return finalizeSummary(result);
 }
