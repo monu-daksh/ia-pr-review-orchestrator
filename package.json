@@ -1,7 +1,20 @@
 {
   "name": "pr-review-orchestrator",
   "version": "1.0.0",
-  "description": "Multi-agent AI PR review system. Install in any repo — agents auto-fire on PRs and post inline code review comments.",
+  "description": "Multi-agent AI PR review system with Judge Agent. 8 specialized agents (security, bug, logic, types, performance, eslint, best-practices, quality) run in parallel. Works with Claude, Groq, Gemini, Ollama, or local patterns — no API key required.",
+  "author": {
+    "name": "Monu Daksh",
+    "url": "https://github.com/monudaksh"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/monudaksh/pr-review-orchestrator#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/monudaksh/pr-review-orchestrator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/monudaksh/pr-review-orchestrator/issues"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -18,20 +31,26 @@
     "dist/**/*.js",
     "dist/**/*.d.ts",
     "dist/**/*.js.map",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "keywords": [
     "pr-review",
     "code-review",
     "ai",
     "multi-agent",
+    "judge-agent",
     "github-actions",
     "llm",
     "groq",
     "anthropic",
     "claude",
+    "gemini",
+    "ollama",
     "automated-review",
-    "ci"
+    "ci",
+    "security",
+    "typescript"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
