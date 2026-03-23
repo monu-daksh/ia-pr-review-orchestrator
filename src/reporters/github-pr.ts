@@ -2,257 +2,236 @@
  * ============================================================
  * FILE: src/reporters/github-pr.ts
  * PURPOSE: Converts a ReviewResult into a GitHub PR review report.
- *          Formats findings as inline PR comments and a summary comment
- *          ready to be posted to the GitHub API.
  *
- * OUTPUT: GithubPRReviewReport with:
- *   comments        → inline comments for specific file:line locations
- *                     (only for lines that appear in the diff — GitHub requires this)
- *   summary_comment → full markdown summary comment for the PR thread
- *                     (includes ALL findings, even those not on changed lines)
- *   summary_only_findings → count of findings that can only go in summary
- *                            (not on a changed line — can't be placed inline)
+ * TWO OUTPUT MODES:
  *
- * HOW GITHUB PR COMMENTS WORK:
- *   Inline comments can only be placed on lines in the diff (changed lines).
- *   A finding on line 10 can only be an inline comment if line 10 appears
- *   in the PR's changed_lines. Otherwise it goes in the summary comment only.
+ *   1. BUNDLED (default — recommended)
+ *      A single PR comment that groups ALL findings by agent.
+ *      Every agent gets its own collapsible section so nothing is buried.
+ *      Posted via: POST /repos/{owner}/{repo}/issues/{pr}/comments
  *
- * FORMATTING:
- *   Uses markdown with emoji badges for severity and agent labels.
- *   Summary shows findings in <details> collapsible blocks for readability.
+ *   2. INLINE (optional — for code-line annotation)
+ *      Individual comments placed on specific diff lines.
+ *      Only works for lines that appear in the diff.
+ *      Posted via: POST /repos/{owner}/{repo}/pulls/{pr}/reviews
+ *
+ * WHY BUNDLED BY DEFAULT?
+ *   Inline comments scatter findings across the diff. When 8 agents run,
+ *   GitHub collapses all but the first few comments — users see "26 hidden
+ *   conversations" and miss critical findings from later agents.
+ *   A single bundled comment shows EVERYTHING in one place with full context.
  * ============================================================
  */
 
 import type { PRComment, ReviewResult } from "../types.js";
 
-/**
- * The output format returned by buildGithubPRReviewReport().
- * This matches what the GitHub REST API expects for PR review comments.
- */
+// ─── Output Interface ────────────────────────────────────────────────────────
+
 export interface GithubPRReviewReport {
-  summary: ReviewResult["summary"];  // Overall counts (total files, issues, decision)
+  summary: ReviewResult["summary"];
+  /** Bundled markdown comment — ONE comment with ALL findings grouped by agent */
+  bundled_comment: string;
+  /** Individual inline comments (optional, only for lines in the diff) */
   comments: Array<{
-    path: string;     // File path (for GitHub API: "src/foo.ts")
-    line: number;     // Line number in the diff (must be a changed line)
-    severity: string; // Severity level for sorting/filtering
-    body: string;     // Formatted markdown comment body
+    path: string;
+    line: number;
+    severity: string;
+    body: string;
   }>;
-  summary_comment: string;        // Full markdown summary for the PR thread
-  summary_only_findings: number;  // How many findings couldn't be placed inline
+  /** Legacy field — same as bundled_comment, kept for backwards compatibility */
+  summary_comment: string;
+  summary_only_findings: number;
 }
 
-// ─── Badge Lookup Tables ──────────────────────────────────────────────────────
+// ─── Badge & Label Maps ───────────────────────────────────────────────────────
 
-/**
- * Visual severity badges used in PR comments.
- * The colored circles make it easy to scan findings by severity at a glance.
- */
 const SEVERITY_BADGE: Record<string, string> = {
   critical: "🔴 CRITICAL",
-  high: "🟠 HIGH",
-  medium: "🟡 MEDIUM",
-  low: "🔵 LOW"
+  high:     "🟠 HIGH",
+  medium:   "🟡 MEDIUM",
+  low:      "🔵 LOW"
 };
 
-/**
- * Decision badges shown in the summary header.
- * Green checkmark = approve, red stop = request changes.
- */
+const SEVERITY_EMOJI: Record<string, string> = {
+  critical: "🔴",
+  high:     "🟠",
+  medium:   "🟡",
+  low:      "🔵"
+};
+
 const DECISION_BADGE: Record<string, string> = {
-  approve: "✅ Approve",
-  request_changes: "🚫 Request Changes"
+  approve:         "✅ Approved — No blocking issues found",
+  request_changes: "🚫 Changes Requested — Blocking issues detected"
 };
 
-/**
- * Agent labels with emoji for the PR comment table.
- * Each emoji visually represents what the agent specializes in.
- */
 const AGENT_LABEL: Record<string, string> = {
-  security: "🛡️ Security Agent",
-  bug: "🐛 Bug Agent",
-  logic: "🧠 Logic Agent",
-  types: "📐 Type Agent",
-  eslint: "🔍 ESLint Agent",
-  performance: "⚡ Performance Agent",
-  "best-practices": "✅ Best Practices Agent",
-  quality: "🏗️ Quality Agent",
-  fix: "🔧 Fix Agent"
+  security:         "🛡️ Security",
+  bug:              "🐛 Bug",
+  logic:            "🧠 Logic",
+  types:            "📐 Types",
+  eslint:           "🔍 ESLint",
+  performance:      "⚡ Performance",
+  "best-practices": "✅ Best Practices",
+  quality:          "🏗️ Quality",
+  fix:              "🔧 Fix"
 };
 
-// ─── Formatting Helpers ───────────────────────────────────────────────────────
+/** Short description of what each agent covers — shown in the agent table */
+const AGENT_SCOPE: Record<string, string> = {
+  security:         "secrets, tokens, XSS, unsafe HTML, injections",
+  bug:              "crashes, null issues, async bugs, infinite loops",
+  logic:            "wrong conditions, loose equality, validation flaws",
+  types:            "any usage, missing types, unsafe typing",
+  performance:      "heavy loops, blocking UI, re-renders, Math.random in JSX",
+  eslint:           "console logs, unused variables, useless handlers",
+  "best-practices": "hardcoded values, poor structure, missing error handling",
+  quality:          "bad React patterns, side effects in render, large components"
+};
 
-/**
- * Wraps code in a markdown fenced code block.
- * Returns empty string if code is empty/whitespace.
- *
- * @param code - The code to wrap
- * @param lang - Language for syntax highlighting (default: "ts")
- * @returns Markdown fenced code block string
- */
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
 function fenceBlock(code: string, lang = "ts"): string {
   const trimmed = code?.trim();
-  if (!trimmed) return ""; // No code → no block
-  return `\`\`\`${lang}\n${trimmed}\n\`\`\``;
+  return trimmed ? `\`\`\`${lang}\n${trimmed}\n\`\`\`` : "";
 }
 
-/**
- * Resolves which line number to use for an inline PR comment.
- *
- * GitHub only allows inline comments on lines that appear in the diff
- * (i.e., lines in changed_lines). If the finding's line isn't in the diff,
- * returns null — the finding will only appear in the summary comment.
- *
- * @param review  - The full ReviewResult (needed to check changed_lines per file)
- * @param comment - The PR comment with the reported line number
- * @returns The line number for inline placement, or null if not on a changed line
- */
+/** Resolves the line number for an inline comment — null if not on a changed line */
 function resolveCommentLine(review: ReviewResult, comment: PRComment): number | null {
-  // Find the file's ReviewFileResult to get its changed_lines list
   const file = review.files.find((entry) => entry.file === comment.file);
-  // Get changed lines — filter out any non-finite values for safety
   const changedLines = file?.changed_lines?.filter((line) => Number.isFinite(line)) ?? [];
-
-  if (changedLines.length === 0) return null; // No changed lines in this file → can't place inline
-
-  // Only place inline if the reported line was actually changed in this PR
+  if (changedLines.length === 0) return null;
   return changedLines.includes(comment.line) ? comment.line : null;
 }
 
-/**
- * Converts a PRComment into a GitHub PR review comment object.
- * Returns null if the comment's line isn't in the diff (can't be inline).
- *
- * The comment body uses a table format for metadata and code blocks for fixes:
- *   ## [🔴 CRITICAL] Hardcoded Secret
- *   | Agent | 🛡️ Security Agent |
- *   | File  | `src/auth.ts`      |
- *   | Line  | 42                 |
- *   **🔎 Issue**
- *   <explanation text>
- *   **🔧 Suggested Fix**
- *   ```ts
- *   <fixed code>
- *   ```
- *
- * @param review  - Full ReviewResult for line resolution
- * @param comment - The PR comment to format
- * @returns Formatted comment object, or null if can't be placed inline
- */
-function toGithubComment(review: ReviewResult, comment: PRComment): GithubPRReviewReport["comments"][number] | null {
-  const resolvedLine = resolveCommentLine(review, comment);
-  if (resolvedLine == null) return null; // Can't place inline — will be in summary only
-
-  const badge = SEVERITY_BADGE[comment.severity] ?? comment.severity.toUpperCase(); // e.g., "🔴 CRITICAL"
-  const agent = AGENT_LABEL[comment.agent] ?? comment.agent;                        // e.g., "🛡️ Security Agent"
-
-  const lines: string[] = [
-    `## [${badge}] ${comment.title}`, // Severity badge + issue title
-    "",
-    `| | |`,                          // Table header (empty columns for layout)
-    `|---|---|`,
-    `| **Agent** | ${agent} |`,       // Which agent found this
-    `| **File** | \`${comment.file}\` |`,
-    `| **Line** | ${comment.line} |`,
-    ""
-  ];
-
-  // Include the issue explanation
-  if (comment.issue) {
-    lines.push("**🔎 Issue**", "", comment.issue, "");
-  }
-
-  // Include the code fix if available
-  if (comment.corrected_code?.trim()) {
-    lines.push("**🔧 Suggested Fix**", "", fenceBlock(comment.corrected_code), "");
-  }
-
-  return {
-    path: comment.file,         // File path for GitHub API
-    line: resolvedLine,         // Line number for inline placement
-    severity: comment.severity, // For sorting/filtering by consumers
-    body: lines.join("\n")      // Full formatted markdown body
-  };
-}
-
-// ─── Summary Comment Builder ──────────────────────────────────────────────────
+// ─── Bundled Comment Builder ──────────────────────────────────────────────────
 
 /**
- * Builds the full summary comment posted to the PR thread.
- * This is always posted (unlike inline comments which only go on changed lines).
+ * Builds a single comprehensive PR comment with ALL findings grouped by agent.
  *
- * Format:
+ * Structure:
  *   ## 🔍 PR Review Orchestrator
- *   | Decision | Issues | Critical | High | Medium | Low |
- *   (table row with counts)
+ *   Decision badge + overview table
  *
- *   ### 📋 Findings
- *   <details> (collapsible per finding, up to 20)
- *   <summary>[severity badge] title — agent · file:line</summary>
- *   Issue: explanation
- *   Placement: 📌 Inline / 📄 Summary only
- *   Suggested Fix: code block
+ *   ### 🤖 Agent Pipeline
+ *   Table: agent | scope | finding count
+ *
+ *   ### 📋 Findings by Agent
+ *   <details> per agent (auto-open for critical/high)
+ *     Per-finding: severity badge, title, file:line, issue text, fix code block
  *   </details>
- *
- * @param review - The full ReviewResult
- * @returns Markdown string for the GitHub PR summary comment
  */
-function buildSummaryComment(review: ReviewResult): string {
-  // Pre-compute which comments can be placed inline (for "Placement" indicator)
-  const inlineKeys = new Set(
-    review.reports.pr_comments
-      .map((comment) => toGithubComment(review, comment))
-      .filter((comment): comment is GithubPRReviewReport["comments"][number] => comment !== null)
-      .map((comment) => `${comment.path}:${comment.line}:${comment.body}`) // Unique key per inline comment
+function buildBundledComment(review: ReviewResult): string {
+  const { summary } = review;
+  const decision = DECISION_BADGE[summary.final_decision] ?? summary.final_decision;
+
+  // Use flat normalized findings list (post-deduplication)
+  const allFindings = review.reports.findings ?? [];
+
+  const lines: string[] = [];
+
+  // ── Header ──────────────────────────────────────────────────────────────
+  lines.push("## 🔍 PR Review Orchestrator");
+  lines.push("");
+  lines.push(`**${decision}**`);
+  lines.push("");
+
+  // ── Overview Table ───────────────────────────────────────────────────────
+  lines.push("| Files | Issues | 🔴 Critical | 🟠 High | 🟡 Medium | 🔵 Low |");
+  lines.push("|---|---|---|---|---|---|");
+  lines.push(
+    `| ${summary.total_files} | **${summary.total_issues}** | ${summary.critical_count} | ${summary.high_count} | ${summary.medium_count} | ${summary.low_count} |`
   );
+  lines.push("");
 
-  const decision = DECISION_BADGE[review.summary.final_decision] ?? review.summary.final_decision;
+  // ── Agent Pipeline Table ─────────────────────────────────────────────────
+  if (review.reports.agent_runs?.length) {
+    lines.push("### 🤖 Agent Pipeline");
+    lines.push("");
+    lines.push("| Agent | Scope | Findings |");
+    lines.push("|---|---|---|");
 
-  const lines = [
-    "## 🔍 PR Review Orchestrator",
-    "",
-    // Summary table with decision and severity counts
-    "| Decision | Issues | 🔴 Critical | 🟠 High | 🟡 Medium | 🔵 Low |",
-    "|---|---|---|---|---|---|",
-    `| ${decision} | ${review.summary.total_issues} | ${review.summary.critical_count} | ${review.summary.high_count} | ${review.summary.medium_count} | ${review.summary.low_count} |`,
-    ""
-  ];
+    for (const run of review.reports.agent_runs) {
+      if (run.agent === "fix") continue; // skip the synthetic fix agent
+      const label  = AGENT_LABEL[run.agent] ?? run.agent;
+      const scope  = AGENT_SCOPE[run.agent] ?? "—";
+      const agentFindings = allFindings.filter((f) => f.agent === run.agent);
 
-  // If no findings at all, show a clean "all good" message
-  if (review.reports.pr_comments.length === 0) {
-    lines.push("✅ No findings were generated.");
+      // Build a compact severity string like "🔴🔴🟠🟡🔵"
+      const severityDots = agentFindings
+        .map((f) => SEVERITY_EMOJI[f.severity] ?? "⚪")
+        .join("");
+
+      const countStr = run.findings > 0
+        ? `**${run.findings}** ${severityDots}`
+        : "✓ clean";
+
+      lines.push(`| ${label} | ${scope} | ${countStr} |`);
+    }
+    lines.push("");
+  }
+
+  // ── No findings state ─────────────────────────────────────────────────────
+  if (allFindings.length === 0) {
+    lines.push("---");
+    lines.push("");
+    lines.push("✅ All agents completed — no issues detected.");
     return lines.join("\n");
   }
 
-  lines.push("### 📋 Findings", "");
+  // ── Findings by Agent ─────────────────────────────────────────────────────
+  lines.push("### 📋 Findings by Agent");
+  lines.push("");
 
-  // Show up to 20 findings in collapsible <details> blocks
-  // (More than 20 findings would make the summary too long)
-  for (const comment of review.reports.pr_comments.slice(0, 20)) {
-    const badge = SEVERITY_BADGE[comment.severity] ?? comment.severity.toUpperCase();
-    const agent = AGENT_LABEL[comment.agent] ?? comment.agent;
+  // Get unique agents that have findings, in a stable order
+  const agentOrder = ["security", "bug", "logic", "types", "performance", "eslint", "best-practices", "quality"] as const;
 
-    // Determine if this specific comment can be placed inline
-    const inlineVersion = toGithubComment(review, comment);
-    const isInline = inlineVersion ? inlineKeys.has(`${inlineVersion.path}:${inlineVersion.line}:${inlineVersion.body}`) : false;
+  for (const agentKey of agentOrder) {
+    const agentFindings = allFindings.filter((f) => f.agent === agentKey);
+    if (agentFindings.length === 0) continue;
 
-    // Collapsible block — click to expand details
-    lines.push(`<details>`);
-    lines.push(`<summary><strong>[${badge}] ${comment.title}</strong> — ${agent} · <code>${comment.file}:${comment.line}</code></summary>`);
+    const label  = AGENT_LABEL[agentKey] ?? agentKey;
+    const hasCriticalOrHigh = agentFindings.some((f) => f.severity === "critical" || f.severity === "high");
+
+    // Severity breakdown for the section header
+    const severityBreakdown = (["critical", "high", "medium", "low"] as const)
+      .map((sev) => {
+        const count = agentFindings.filter((f) => f.severity === sev).length;
+        return count > 0 ? `${SEVERITY_EMOJI[sev]} ${count}` : null;
+      })
+      .filter(Boolean)
+      .join("  ");
+
+    // Auto-open critical/high sections so blockers are immediately visible
+    const openAttr = hasCriticalOrHigh ? " open" : "";
+
+    lines.push(`<details${openAttr}>`);
+    lines.push(`<summary><strong>${label} — ${agentFindings.length} issue${agentFindings.length !== 1 ? "s" : ""}</strong>  ${severityBreakdown}</summary>`);
     lines.push("");
-    lines.push(`**Issue:** ${comment.issue}`);
-    lines.push("");
-    // Show whether this finding will also appear as an inline comment
-    lines.push(`**Placement:** ${isInline ? "📌 Inline comment" : "📄 Summary only"}`);
 
-    // Show the fix code if available
-    if (comment.corrected_code?.trim()) {
+    for (const finding of agentFindings) {
+      const badge = SEVERITY_BADGE[finding.severity] ?? finding.severity.toUpperCase();
+
+      lines.push("---");
       lines.push("");
-      lines.push("**🔧 Suggested Fix:**");
-      lines.push(fenceBlock(comment.corrected_code));
+      lines.push(`**[${badge}] ${finding.title}**`);
+      lines.push(`> \`${finding.file}\` — Line ${finding.line} · confidence ${Math.round((finding.confidence ?? 0) * 100)}%`);
+      lines.push("");
+      lines.push(finding.issue);
+      lines.push("");
+
+      if (finding.code_snippet?.trim()) {
+        lines.push("**Problem code:**");
+        lines.push(fenceBlock(finding.code_snippet));
+        lines.push("");
+      }
+
+      if (finding.corrected_code?.trim()) {
+        lines.push("**🔧 Fix:**");
+        lines.push(fenceBlock(finding.corrected_code));
+        lines.push("");
+      }
     }
 
-    lines.push("");
     lines.push("</details>");
     lines.push("");
   }
@@ -260,27 +239,75 @@ function buildSummaryComment(review: ReviewResult): string {
   return lines.join("\n");
 }
 
+// ─── Inline Comment Builder ────────────────────────────────────────────────────
+
+/**
+ * Converts a PRComment into a GitHub inline review comment.
+ * Returns null if the finding's line isn't in the diff (can't be placed inline).
+ */
+function toGithubInlineComment(
+  review: ReviewResult,
+  comment: PRComment
+): GithubPRReviewReport["comments"][number] | null {
+  const resolvedLine = resolveCommentLine(review, comment);
+  if (resolvedLine == null) return null;
+
+  const badge = SEVERITY_BADGE[comment.severity] ?? comment.severity.toUpperCase();
+  const agent = AGENT_LABEL[comment.agent]  ?? comment.agent;
+
+  const bodyLines: string[] = [
+    `**[${badge}] ${comment.title}**`,
+    "",
+    `| | |`,
+    `|---|---|`,
+    `| **Agent** | ${agent} |`,
+    `| **File**  | \`${comment.file}\` |`,
+    `| **Line**  | ${comment.line} |`,
+    ""
+  ];
+
+  if (comment.issue) {
+    bodyLines.push("**🔎 Issue**", "", comment.issue, "");
+  }
+
+  if (comment.corrected_code?.trim()) {
+    bodyLines.push("**🔧 Fix**", "", fenceBlock(comment.corrected_code), "");
+  }
+
+  return {
+    path:     comment.file,
+    line:     resolvedLine,
+    severity: comment.severity,
+    body:     bodyLines.join("\n")
+  };
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
  * Converts a ReviewResult into a GithubPRReviewReport.
- * This is the main function used by the CLI when --format github-pr is set,
- * and by GitHub Actions workflows to post reviews.
  *
- * @param review - The complete ReviewResult from reviewDiff()
- * @returns GithubPRReviewReport with inline comments and summary comment
+ * PRIMARY OUTPUT: `bundled_comment`
+ *   A single markdown comment with ALL findings grouped by agent.
+ *   Post this to the PR using the Issues Comments API so it appears as
+ *   one consolidated review instead of many scattered inline comments.
+ *
+ * SECONDARY OUTPUT: `comments`
+ *   Individual inline comments for code-line annotation.
+ *   Optional — only useful if you want inline diff highlighting in addition.
  */
 export function buildGithubPRReviewReport(review: ReviewResult): GithubPRReviewReport {
-  // Convert all PR comments to inline GitHub comments (null = not on a changed line)
-  const comments = review.reports.pr_comments
-    .map((comment) => toGithubComment(review, comment))
-    .filter((comment): comment is GithubPRReviewReport["comments"][number] => comment !== null); // Remove nulls
+  const bundled = buildBundledComment(review);
+
+  const inlineComments = review.reports.pr_comments
+    .map((comment) => toGithubInlineComment(review, comment))
+    .filter((c): c is GithubPRReviewReport["comments"][number] => c !== null);
 
   return {
-    summary: review.summary,
-    comments,                                  // Only inline-placeable comments
-    summary_comment: buildSummaryComment(review), // Full summary with ALL findings
-    // How many findings couldn't be placed inline (informational — for logging)
-    summary_only_findings: Math.max(0, review.reports.pr_comments.length - comments.length)
+    summary:                review.summary,
+    bundled_comment:        bundled,
+    comments:               inlineComments,
+    summary_comment:        bundled, // backwards compat alias
+    summary_only_findings:  Math.max(0, review.reports.pr_comments.length - inlineComments.length)
   };
 }

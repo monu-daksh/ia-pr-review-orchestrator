@@ -403,6 +403,63 @@ export interface ReviewProvider {
   review(promptPayload: PromptPayload, triagedFiles: TriagedFile[]): Promise<ReviewResult>;
 }
 
+// ─── Judge Agent ─────────────────────────────────────────────────────────────
+
+/**
+ * Judge's verdict on a single finding from any agent.
+ * `keep`         → true = validated real issue, false = false positive / out of scope
+ * `duplicate_of` → if set, this finding is a duplicate of the given finding ID
+ * `reason`       → one-line explanation for the decision
+ */
+export interface JudgeFindingDecision {
+  id: string;
+  keep: boolean;
+  reason: string;
+  duplicate_of?: string;
+}
+
+/**
+ * A gap the judge detected — an issue that existed in the code
+ * but no agent caught. The judge names the agent responsible for it.
+ */
+export interface JudgeGap {
+  agent: Exclude<AgentName, "fix">;  // Which agent SHOULD have found this
+  missed: string;                    // Description of what was missed
+  line?: number;                     // Approximate line number
+  severity: Severity;                // How serious the missed issue is
+}
+
+/**
+ * Judge's performance score for a single agent.
+ * `score`       → 0.0 (missed everything) to 1.0 (perfect coverage)
+ * `needs_retry` → true if score < 0.5 or agent missed critical/high issues
+ * `gaps`        → human-readable list of specific things the agent missed
+ */
+export interface JudgeAgentScore {
+  agent: Exclude<AgentName, "fix">;
+  score: number;
+  needs_retry: boolean;
+  gaps: string[];
+}
+
+/**
+ * Complete verdict from the Judge Agent for a single file.
+ * Produced by judge-agent.ts after reviewing all 8 agent outputs.
+ *
+ * `decisions`    → keep/dismiss decision on every individual finding
+ * `gaps`         → issues that existed but no agent caught
+ * `agent_scores` → quality score (0–1) per agent
+ * `retry_agents` → agents that need to re-run (score < 0.5 or missed critical/high)
+ * `summary`      → one-line judge assessment for logging
+ */
+export interface JudgeVerdict {
+  decisions:    JudgeFindingDecision[];
+  gaps:         JudgeGap[];
+  agent_scores: JudgeAgentScore[];
+  retry_agents: Exclude<AgentName, "fix">[];
+  summary:      string;
+}
+
 // ─── CLI Options ──────────────────────────────────────────────────────────────
 
 /**

@@ -58,6 +58,7 @@ import type {
 import { createEmptyReview, finalizeSummary } from "../core/schema.js";
 import { callAI } from "../utils/ai-call.js";
 import { runLocalAgentPipeline } from "./local-agents.js";
+import { runJudgePipeline } from "./judge-agent.js";
 import { safeJsonParse } from "../utils/json.js";
 
 // ─── Internal Response Types ─────────────────────────────────────────────────
@@ -563,43 +564,58 @@ function buildAgentRuns(files: ReviewFileResult[]): AgentRunSummary[] {
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Runs the AI multi-agent pipeline on all triaged files.
+ * Runs the full multi-agent + judge pipeline on all triaged files.
  * Called by MultiAgentProvider.review().
  *
- * PIPELINE:
- *   1. For each file, run all 8 specialized agents in parallel
- *   2. Collect ALL findings — no keyword filtering at this stage
- *   3. If ALL agents found nothing across ALL files → run local pattern fallback
- *   4. finalizeSummary: deduplicate cross-agent overlaps, count severities, decide approve/request_changes
- *
- * DEDUPLICATION happens in finalizeSummary (schema.ts), not here.
- * This ensures a bug agent finding and a security agent finding for the same line
- * are merged correctly rather than one being silently dropped by a filter.
+ * PIPELINE (6 steps):
+ *   1. Run all 8 specialized agents in parallel across all files
+ *   2. If zero findings everywhere → local pattern fallback
+ *   3. Run Judge Agent per file:
+ *        a. Validate each finding (keep / dismiss false positives)
+ *        b. Deduplicate cross-agent overlaps
+ *        c. Detect gaps — what no agent caught
+ *        d. Score each agent (0–1)
+ *        e. Retry underperforming agents with gap-targeted prompts
+ *   4. Merge retry findings back in
+ *   5. finalizeSummary: schema-level dedup, count severities, decide approve/request_changes
  */
 export async function runAIAgentPipeline(triagedFiles: TriagedFile[]): Promise<ReviewResult> {
   const result = createEmptyReview(triagedFiles);
 
-  // Run all agents on all files in parallel
+  // Step 1 — Run all 8 agents on every file in parallel
   const fileResults = await Promise.all(triagedFiles.map((file) => reviewFileWithAI(file)));
 
-  // Check if any agent produced any findings at all
+  // Step 2 — Fallback if no AI is available or all calls failed
   const hasAnyFindings = fileResults.some((file) =>
     file.review.issues.length > 0 || file.security.vulnerabilities.length > 0
   );
-
-  // Fallback: no AI configured, all calls failed, or AI returned nothing for all files
   if (!hasAnyFindings) {
     return runLocalAgentPipeline(triagedFiles);
   }
 
-  result.files = fileResults;
+  // Step 3–4 — Judge Agent: validate, deduplicate, gap-detect, retry underperforming agents
+  // runJudgePipeline mutates fileResults in-place and returns the improved array.
+  const judgedResults = await runJudgePipeline(
+    fileResults,
+    triagedFiles,
+    AGENT_SPECS.map((spec) => ({
+      agent:      spec.agent,
+      category:   spec.category,
+      system:     spec.system,
+      maxTokens:  spec.maxTokens,
+      confidence: spec.confidence
+    }))
+  );
 
-  result.reports.pr_comments = fileResults.flatMap((file) =>
+  // Step 5 — Finalize
+  result.files = judgedResults;
+
+  result.reports.pr_comments = judgedResults.flatMap((file) =>
     [...file.review.issues, ...file.security.vulnerabilities].map(buildComment)
   );
 
-  result.reports.agent_runs = buildAgentRuns(fileResults);
+  result.reports.agent_runs = buildAgentRuns(judgedResults);
 
-  // Deduplicate, count, decide, build markdown summary
+  // Deduplicate, count severities, decide approve/request_changes, build markdown
   return finalizeSummary(result);
 }
