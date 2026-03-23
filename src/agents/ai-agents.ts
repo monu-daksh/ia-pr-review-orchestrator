@@ -246,7 +246,16 @@ function buildCodeContext(file: TriagedFile): string {
  */
 const JSON_INSTRUCTION = `
 Respond ONLY with valid JSON in this exact format - no markdown fences, no prose:
-{"issues":[{"line":<number>,"title":"<string>","message":"<string>","severity":"critical|high|medium|low","code_snippet":"<string>","suggestion":"<string>","fix":"<string>"}]}
+{"issues":[{"line":<number>,"title":"<string>","message":"<string>","severity":"critical|high|medium|low","confidence":<0.0-1.0>,"code_snippet":"<string>","suggestion":"<string>","fix":"<string>"}]}
+
+Pipeline rules before outputting:
+STEP 1 — Detect all issues in your assigned scope across the ENTIRE file.
+STEP 2 — Merge any duplicate findings. Keep the most complete version.
+STEP 3 — Remove false positives. Only keep real, high-confidence issues. Assign severity: critical (crash/security), high (major bug/logic), medium (performance/maintainability), low (minor issues).
+STEP 4 — Consider full file context. Do NOT report out-of-scope issues.
+STEP 5 — If you found nothing, re-check once to ensure nothing was missed.
+STEP 6 — For each issue, provide concrete corrected code in "fix". Avoid generic advice.
+
 When possible, provide a concrete corrected code snippet in "fix". Do not return generic advice if you can show an exact code change.
 IMPORTANT: Review the ENTIRE "Current full file content" for issues — not only the changed lines. Pre-existing issues anywhere in the file must be reported if the file was touched in this PR. Use the changed lines only to assign accurate line numbers to your findings.
 If an issue does not clearly belong to your assigned review scope, do not report it.

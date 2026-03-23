@@ -38,6 +38,9 @@ export { initProject } from "./setup/init-project.js";
 /** Format converter — turns ReviewResult into GitHub PR review comment format */
 export { buildGithubPRReviewReport } from "./reporters/github-pr.js";
 
+/** HTML reporter — turns ReviewResult into a self-contained, CSS-styled HTML page */
+export { buildHTMLReport } from "./reporters/html-reporter.js";
+
 /** GitHub integration — posts critical/high findings as GitHub Issues */
 export { createGitHubIssues } from "./reporters/github-issues.js";
 
