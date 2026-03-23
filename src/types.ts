@@ -419,6 +419,28 @@ export interface JudgeFindingDecision {
 }
 
 /**
+ * A group of same-type findings consolidated by the judge into ONE report entry.
+ * Replaces all individual findings listed in `ids` with a single consolidated finding.
+ *
+ * Example: 4× "Loose any typing" at lines 7,10,27,32 → ONE entry:
+ *   title:  "Multiple `any` type usages · 4 locations"
+ *   lines:  [7, 10, 27, 32]
+ *   issue:  single shared description
+ *   fix:    one representative fix (or pattern fix)
+ */
+export interface JudgeConsolidatedGroup {
+  ids:       string[];                        // IDs of all findings being merged
+  agent:     Exclude<AgentName, "fix">;       // Agent that owns this group
+  category:  IssueCategory;                  // bug / security / performance / quality
+  severity:  Severity;                       // Highest severity in the group
+  title:     string;                         // e.g. "Multiple `any` type usages · 4 locations"
+  issue:     string;                         // Shared description written ONCE
+  lines:     number[];                       // All affected line numbers
+  fix:       string;                         // Representative fix or pattern
+  confidence: number;                        // Confidence for the group
+}
+
+/**
  * A gap the judge detected — an issue that existed in the code
  * but no agent caught. The judge names the agent responsible for it.
  */
@@ -454,6 +476,7 @@ export interface JudgeAgentScore {
  */
 export interface JudgeVerdict {
   decisions:    JudgeFindingDecision[];
+  groups:       JudgeConsolidatedGroup[];   // Same-type findings merged into single entries
   gaps:         JudgeGap[];
   agent_scores: JudgeAgentScore[];
   retry_agents: Exclude<AgentName, "fix">[];
