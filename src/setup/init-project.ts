@@ -100,7 +100,7 @@ function buildInitConfig(repoTypes: string[], providerChoice: InstallProviderCho
       ? ["src", "app", "services", "tests"]
       : repoTypes.includes("java")
         ? ["src/main", "src/test"]
-        : ["src", "server", "api"];
+        : ["src", "server", "api", "app"];
 
   return JSON.stringify(
     {
